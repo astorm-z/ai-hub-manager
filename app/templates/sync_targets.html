@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>同步目标</h1>
+      <p>管理 sub2api 与 new-api 目标站点，用于后续渠道同步。</p>
+    </div>
+  </div>
+
+  <section class="panel">
+    <h2>{{ "编辑同步目标" if mode == "edit" else "新增同步目标" }}</h2>
+    {% if mode == "edit" %}
+      <p class="muted">正在编辑：{{ editing.name }}。密钥留空会保留原配置。</p>
+    {% endif %}
+    <form method="post" action="{{ '/sync-targets/' ~ editing.id if mode == 'edit' else '/sync-targets' }}" class="sync-target-form">
+      <div class="form-grid">
+        <div class="field">
+          <label for="name">名称</label>
+          <input id="name" name="name" value="{{ form.name }}" required>
+        </div>
+        <div class="field">
+          <label for="target_type">类型</label>
+          <select id="target_type" name="target_type" class="sync-target-type">
+            <option value="sub2api" {% if form.target_type == "sub2api" %}selected{% endif %}>sub2api</option>
+            <option value="new_api" {% if form.target_type == "new_api" %}selected{% endif %}>new-api</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="base_url">Base URL</label>
+          <input id="base_url" name="base_url" value="{{ form.base_url }}" placeholder="https://target.example.com" required>
+        </div>
+        <div class="field">
+          <label for="name_prefix">名称前缀</label>
+          <input id="name_prefix" name="name_prefix" value="{{ form.name_prefix }}" placeholder="union_">
+        </div>
+
+        <div class="field full sync-target-fields sync-target-sub2api">
+          <h3>sub2api 认证</h3>
+        </div>
+        <div class="field full sync-target-fields sync-target-sub2api">
+          <label for="sub2api_admin_api_key">Admin API Key</label>
+          <input id="sub2api_admin_api_key" name="sub2api_admin_api_key" type="password" autocomplete="new-password" placeholder="{{ '留空保留原密钥' if mode == 'edit' else '' }}">
+        </div>
+
+        <div class="field full sync-target-fields sync-target-new_api">
+          <h3>new-api 认证</h3>
+        </div>
+        <div class="field sync-target-fields sync-target-new_api">
+          <label for="newapi_authorization">Authorization</label>
+          <input id="newapi_authorization" name="newapi_authorization" type="password" autocomplete="new-password" placeholder="{{ '留空保留原密钥' if mode == 'edit' else 'Bearer token' }}">
+        </div>
+        <div class="field sync-target-fields sync-target-new_api">
+          <label for="newapi_user">New-Api-User</label>
+          <input id="newapi_user" name="newapi_user" value="{{ form.newapi_user }}" placeholder="用户 ID">
+        </div>
+
+        {% if mode == "edit" %}
+          <div class="field full">
+            {% if form.secret_configured %}
+              <span class="badge success">已配置密钥</span>
+            {% else %}
+              <span class="badge warning">未配置密钥</span>
+            {% endif %}
+          </div>
+        {% endif %}
+        <div class="field full">
+          <label class="check-row">
+            <input type="checkbox" name="enabled" value="true" {% if form.enabled %}checked{% endif %}>
+            启用同步目标
+          </label>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">{{ "保存同步目标" if mode == "edit" else "创建同步目标" }}</button>
+        {% if mode == "edit" %}
+          <a class="button secondary" href="/sync-targets">取消编辑</a>
+        {% endif %}
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>目标列表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>类型</th>
+          <th>Base URL</th>
+          <th>前缀</th>
+          <th>状态</th>
+          <th>认证</th>
+          <th>关联</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in targets %}
+          {% set item = row.target %}
+          <tr>
+            <td>{{ item.name }}</td>
+            <td>{{ "new-api" if item.target_type == "new_api" else "sub2api" }}</td>
+            <td><div class="code">{{ item.base_url }}</div></td>
+            <td><code>{{ item.name_prefix }}</code></td>
+            <td>
+              {% if item.enabled %}
+                <span class="badge success">启用</span>
+              {% else %}
+                <span class="badge">停用</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.secret_configured %}
+                <span class="badge success">已配置</span>
+              {% else %}
+                <span class="badge warning">未配置</span>
+              {% endif %}
+            </td>
+            <td>{{ row.link_count }}</td>
+            <td>
+              <a class="button secondary" href="/sync-targets/{{ item.id }}/edit">编辑</a>
+              <form class="inline-form" method="post" action="/sync-targets/{{ item.id }}/test">
+                <button class="secondary" type="submit">测试</button>
+              </form>
+              <form class="inline-form" method="post" action="/sync-targets/{{ item.id }}/delete" onsubmit="return confirm('确定删除这个同步目标吗？');">
+                <button class="danger" type="submit">删除</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="muted">暂无同步目标。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <script>
+    const form = document.querySelector(".sync-target-form");
+    const targetType = form.querySelector(".sync-target-type");
+    const updateSyncTargetFields = () => {
+      const selected = targetType.value;
+      form.querySelectorAll(".sync-target-fields").forEach((node) => {
+        const visible = node.classList.contains(`sync-target-${selected}`);
+        node.style.display = visible ? "" : "none";
+        node.querySelectorAll("input, select, textarea, button").forEach((field) => {
+          field.disabled = !visible;
+        });
+      });
+    };
+    targetType.addEventListener("change", updateSyncTargetFields);
+    updateSyncTargetFields();
+  </script>
+{% endblock %}

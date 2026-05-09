@@ -13,12 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db, init_db
-from app.models import AlertEvent, AlertRule, BalanceSnapshot, Channel, ChannelModel, ExtractorTemplate, HealthCheck, NotificationChannel, User, now_utc
+from app.models import AlertEvent, AlertRule, BalanceSnapshot, Channel, ChannelModel, ChannelSyncLink, ExtractorTemplate, HealthCheck, NotificationChannel, SyncTarget, User, now_utc
 from app.services.auth import authenticate, create_admin, has_admin, make_session_token, read_session_token
 from app.services.extractors import query_channel_balance, seed_builtin_extractors
 from app.services.monitoring import ensure_default_alert_rule, latest_balance, probe_channel_model, recent_status, refresh_channel_balance, refresh_channel_models
 from app.services.notifications import send_notification
 from app.services.scheduler import start_scheduler, stop_scheduler
+from app.services.sync_clients import SyncClientError, client_for_target
 from app.time_utils import format_dt
 
 
@@ -462,6 +463,134 @@ async def test_notification(notification_id: int, db: Annotated[Session, Depends
     return flash_redirect("/notifications", "测试通知已发送。")
 
 
+@app.get("/sync-targets", response_class=HTMLResponse)
+def sync_targets_page(request: Request, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> HTMLResponse:
+    targets = db.query(SyncTarget).order_by(SyncTarget.created_at.desc()).all()
+    return render(
+        request,
+        "sync_targets.html",
+        {"targets": build_sync_target_rows(db, targets), "user": user, "mode": "create", "form": sync_target_form_from_item()},
+    )
+
+
+@app.post("/sync-targets")
+def create_sync_target(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    name: Annotated[str, Form()],
+    target_type: Annotated[str, Form()],
+    base_url: Annotated[str, Form()],
+    name_prefix: Annotated[str, Form()] = "union_",
+    enabled: Annotated[bool | None, Form()] = None,
+    sub2api_admin_api_key: Annotated[str, Form()] = "",
+    newapi_authorization: Annotated[str, Form()] = "",
+    newapi_user: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    try:
+        config = build_sync_target_config(target_type, sub2api_admin_api_key, newapi_authorization, newapi_user)
+    except ValueError as exc:
+        return flash_redirect("/sync-targets", str(exc), "error")
+
+    target = SyncTarget(
+        name=name.strip(),
+        target_type=target_type,
+        base_url=base_url.strip().rstrip("/"),
+        enabled=bool(enabled),
+        name_prefix=name_prefix.strip() or "union_",
+        auth_config_json=json.dumps(config, ensure_ascii=False),
+        default_config_json="{}",
+    )
+    try:
+        db.add(target)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return flash_redirect("/sync-targets", f"目标站点创建失败：{exc}", "error")
+    return flash_redirect("/sync-targets", "目标站点已创建。")
+
+
+@app.get("/sync-targets/{target_id}/edit", response_class=HTMLResponse)
+def edit_sync_target_page(target_id: int, request: Request, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> HTMLResponse:
+    target = _get_sync_target(db, target_id)
+    targets = db.query(SyncTarget).order_by(SyncTarget.created_at.desc()).all()
+    return render(
+        request,
+        "sync_targets.html",
+        {
+            "targets": build_sync_target_rows(db, targets),
+            "user": user,
+            "mode": "edit",
+            "editing": target,
+            "form": sync_target_form_from_item(target),
+        },
+    )
+
+
+@app.post("/sync-targets/{target_id}")
+def update_sync_target(
+    target_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    name: Annotated[str, Form()],
+    target_type: Annotated[str, Form()],
+    base_url: Annotated[str, Form()],
+    name_prefix: Annotated[str, Form()] = "union_",
+    enabled: Annotated[bool | None, Form()] = None,
+    sub2api_admin_api_key: Annotated[str, Form()] = "",
+    newapi_authorization: Annotated[str, Form()] = "",
+    newapi_user: Annotated[str, Form()] = "",
+) -> RedirectResponse:
+    target = _get_sync_target(db, target_id)
+    try:
+        config = build_sync_target_config(
+            target_type,
+            sub2api_admin_api_key,
+            newapi_authorization,
+            newapi_user,
+            existing=sync_target_auth_config(target),
+        )
+    except ValueError as exc:
+        return flash_redirect(f"/sync-targets/{target.id}/edit", str(exc), "error")
+
+    target.name = name.strip()
+    target.target_type = target_type
+    target.base_url = base_url.strip().rstrip("/")
+    target.enabled = bool(enabled)
+    target.name_prefix = name_prefix.strip() or "union_"
+    target.auth_config_json = json.dumps(config, ensure_ascii=False)
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return flash_redirect(f"/sync-targets/{target.id}/edit", f"目标站点保存失败：{exc}", "error")
+    return flash_redirect("/sync-targets", "目标站点已保存。")
+
+
+@app.post("/sync-targets/{target_id}/delete")
+def delete_sync_target(target_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
+    target = _get_sync_target(db, target_id)
+    linked = db.query(ChannelSyncLink).filter(ChannelSyncLink.target_id == target.id).first()
+    if linked:
+        return flash_redirect("/sync-targets", "目标站点已有渠道关联，请先删除关联。", "error")
+    try:
+        db.delete(target)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        return flash_redirect("/sync-targets", f"目标站点删除失败：{exc}", "error")
+    return flash_redirect("/sync-targets", "目标站点已删除。")
+
+
+@app.post("/sync-targets/{target_id}/test")
+async def test_sync_target(target_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
+    target = _get_sync_target(db, target_id)
+    try:
+        await client_for_target(target).test_connection()
+    except SyncClientError as exc:
+        return flash_redirect("/sync-targets", f"测试失败：{exc}", "error")
+    return flash_redirect("/sync-targets", "目标站点连接测试成功。")
+
+
 @app.get("/alerts", response_class=HTMLResponse)
 def alerts_page(request: Request, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> HTMLResponse:
     events = db.query(AlertEvent).order_by(AlertEvent.created_at.desc()).limit(200).all()
@@ -637,6 +766,13 @@ def _get_notification(db: Session, notification_id: int) -> NotificationChannel:
     return item
 
 
+def _get_sync_target(db: Session, target_id: int) -> SyncTarget:
+    target = db.get(SyncTarget, target_id)
+    if not target:
+        raise HTTPException(status_code=404)
+    return target
+
+
 def _validate_json(value: str) -> str | None:
     if not value:
         return None
@@ -746,6 +882,14 @@ def notification_config(item: NotificationChannel) -> dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
+def sync_target_auth_config(item: SyncTarget) -> dict[str, Any]:
+    try:
+        config = json.loads(item.auth_config_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
 def default_notification_form() -> dict[str, Any]:
     return {
         "name": "",
@@ -795,6 +939,77 @@ def notification_form_from_item(item: NotificationChannel) -> dict[str, Any]:
             }
         )
     return form
+
+
+def build_sync_target_config(
+    target_type: str,
+    sub2api_admin_api_key: str = "",
+    newapi_authorization: str = "",
+    newapi_user: str = "",
+    existing: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    existing = existing or {}
+    if target_type == "sub2api":
+        admin_api_key = sub2api_admin_api_key.strip() or str(existing.get("admin_api_key") or "").strip()
+        if not admin_api_key:
+            raise ValueError("sub2api Admin API Key 必填。")
+        return {"admin_api_key": admin_api_key}
+    if target_type == "new_api":
+        authorization = newapi_authorization.strip() or str(existing.get("authorization") or "").strip()
+        user = newapi_user.strip()
+        if not authorization:
+            raise ValueError("new-api Authorization 必填。")
+        if not user:
+            raise ValueError("new-api New-Api-User 必填。")
+        return {"authorization": authorization, "new_api_user": user}
+    raise ValueError("目标站点类型无效。")
+
+
+def sync_target_form_from_item(item: SyncTarget | None = None) -> dict[str, Any]:
+    form = {
+        "name": "",
+        "target_type": "sub2api",
+        "base_url": "",
+        "enabled": True,
+        "name_prefix": "union_",
+        "sub2api_admin_api_key": "",
+        "newapi_authorization": "",
+        "newapi_user": "",
+        "secret_configured": False,
+    }
+    if item is None:
+        return form
+
+    config = sync_target_auth_config(item)
+    secret_configured = False
+    if item.target_type == "sub2api":
+        secret_configured = bool(str(config.get("admin_api_key") or "").strip())
+    elif item.target_type == "new_api":
+        secret_configured = bool(str(config.get("authorization") or "").strip())
+
+    form.update(
+        {
+            "name": item.name,
+            "target_type": item.target_type,
+            "base_url": item.base_url,
+            "enabled": item.enabled,
+            "name_prefix": item.name_prefix or "union_",
+            "newapi_user": str(config.get("new_api_user") or ""),
+            "secret_configured": secret_configured,
+        }
+    )
+    return form
+
+
+def build_sync_target_rows(db: Session, targets: list[SyncTarget]) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": target,
+            "link_count": db.query(ChannelSyncLink).filter(ChannelSyncLink.target_id == target.id).count(),
+            "secret_configured": sync_target_form_from_item(target)["secret_configured"],
+        }
+        for target in targets
+    ]
 
 
 def _format_body_for_form(value: Any) -> str:
