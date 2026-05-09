@@ -103,7 +103,22 @@ def test_group_id_parser_accepts_commas_and_json():
 
 
 def test_group_id_parser_rejects_invalid_values():
-    for raw in ("1,a", "0", "-1", "[0]", "[-1]", "[1.2]", "[true]", '{"id": 1}', "[1,", "1.2", "true"):
+    for raw in (
+        "1,a",
+        "0",
+        "-1",
+        "[0]",
+        "[-1]",
+        "[1.2]",
+        "[true]",
+        '{"id": 1}',
+        "[1,",
+        "1.2",
+        "true",
+        True,
+        False,
+        1.2,
+    ):
         with pytest.raises(ValueError, match="分组 ID"):
             parse_group_ids(raw)
 

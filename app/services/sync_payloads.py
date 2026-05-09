@@ -44,8 +44,10 @@ def build_model_mapping(models: Iterable[str]) -> dict[str, str]:
 
 
 def parse_group_ids(raw: str | None) -> list[int]:
-    if not raw:
+    if raw is None:
         return []
+    if not isinstance(raw, str):
+        raise ValueError("分组 ID 必须是字符串或整数列表")
 
     text = raw.strip()
     if not text:
