@@ -31,7 +31,12 @@ def test_newapi_payload_maps_openai_channel():
         probe_model="gpt-4o",
     )
 
-    payload = build_newapi_channel_payload(channel, ["gpt-4", "gpt-4o"], remote_name="union_main", remote_id="42")
+    payload = build_newapi_channel_payload(
+        channel,
+        [" gpt-4o ", "gpt-4", "", "gpt-4"],
+        remote_name="union_main",
+        remote_id="42",
+    )
 
     assert payload["id"] == 42
     assert payload["name"] == "union_main"
@@ -97,13 +102,66 @@ def test_group_id_parser_accepts_commas_and_json():
 
 
 def test_group_id_parser_rejects_invalid_values():
-    for raw in ("1,a", "0", "-1", "[0]", "[-1]", "[1.2]"):
+    for raw in ("1,a", "0", "-1", "[0]", "[-1]", "[1.2]", "[true]", '{"id": 1}', "[1,", "1.2", "true"):
         with pytest.raises(ValueError, match="分组 ID"):
             parse_group_ids(raw)
 
 
-def test_build_model_mapping_sorts_and_deduplicates():
-    assert build_model_mapping(["b", "a", "a"]) == {"a": "a", "b": "b"}
+def test_build_model_mapping_sorts_deduplicates_and_ignores_blank_values():
+    assert build_model_mapping([" b ", "a", "a", "", " "]) == {"a": "a", "b": "b"}
+
+
+def test_sub2api_payload_preserves_existing_fields_without_mutating_input():
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="sk-live",
+        enabled=True,
+    )
+    link = ChannelSyncLink(sub2api_group_ids_json="[1]", sub2api_priority=60, sub2api_concurrency=5)
+    existing = {
+        "custom": {"keep": True},
+        "credentials": {"extra": {"nested": "value"}, "api_key": "old"},
+    }
+
+    payload = build_sub2api_account_payload(
+        channel,
+        ["gpt-4"],
+        link,
+        remote_name="union_main",
+        existing_payload=existing,
+    )
+
+    assert existing == {
+        "custom": {"keep": True},
+        "credentials": {"extra": {"nested": "value"}, "api_key": "old"},
+    }
+    assert payload["custom"] == {"keep": True}
+    assert payload["credentials"]["extra"] == {"nested": "value"}
+    assert payload["credentials"]["api_key"] == "sk-live"
+
+
+def test_newapi_payload_preserves_existing_fields_without_mutating_input():
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="sk-live",
+        enabled=True,
+    )
+    existing = {"custom": {"keep": True}, "group": "vip"}
+
+    payload = build_newapi_channel_payload(
+        channel,
+        ["gpt-4"],
+        remote_name="union_main",
+        existing_payload=existing,
+    )
+
+    assert existing == {"custom": {"keep": True}, "group": "vip"}
+    assert payload["custom"] == {"keep": True}
+    assert payload["group"] == "vip"
 
 
 def test_redact_sensitive_masks_nested_secrets():
@@ -111,6 +169,14 @@ def test_redact_sensitive_masks_nested_secrets():
         "authorization": "Bearer token",
         "credentials": {"api_key": "sk-live", "base_url": "https://example.test"},
         "items": [{"key": "secret"}, {"admin_api_key": "admin-secret"}],
+        "variants": {
+            "apiKey": "camel-secret",
+            "api-key": "dash-secret",
+            "x-api-key": "header-secret",
+            "access_token": "access-secret",
+            "refresh_token": "refresh-secret",
+            "password": "password-secret",
+        },
     }
 
     redacted = redact_sensitive(raw)
@@ -120,4 +186,10 @@ def test_redact_sensitive_masks_nested_secrets():
     assert redacted["credentials"]["base_url"] == "https://example.test"
     assert redacted["items"][0]["key"] == "[REDACTED]"
     assert redacted["items"][1]["admin_api_key"] == "[REDACTED]"
+    assert redacted["variants"]["apiKey"] == "[REDACTED]"
+    assert redacted["variants"]["api-key"] == "[REDACTED]"
+    assert redacted["variants"]["x-api-key"] == "[REDACTED]"
+    assert redacted["variants"]["access_token"] == "[REDACTED]"
+    assert redacted["variants"]["refresh_token"] == "[REDACTED]"
+    assert redacted["variants"]["password"] == "[REDACTED]"
     json.dumps(redacted)

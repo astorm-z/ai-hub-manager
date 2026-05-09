@@ -10,7 +10,24 @@ from app.models import Channel, ChannelSyncLink, SyncTarget
 
 NEW_API_OPENAI_TYPE = 1
 NEW_API_ANTHROPIC_TYPE = 14
-SENSITIVE_KEYS = {"api_key", "key", "authorization", "admin_api_key"}
+SENSITIVE_KEYS = {
+    "accesstoken",
+    "adminapikey",
+    "apikey",
+    "authorization",
+    "key",
+    "password",
+    "refreshtoken",
+    "xapikey",
+}
+
+
+def _normalize_models(models: Iterable[str]) -> list[str]:
+    return sorted({model for item in models if (model := str(item).strip())})
+
+
+def _normalize_sensitive_key(key: Any) -> str:
+    return str(key).lower().replace("_", "").replace("-", "")
 
 
 def build_remote_name(target: SyncTarget, channel: Channel) -> str:
@@ -18,7 +35,7 @@ def build_remote_name(target: SyncTarget, channel: Channel) -> str:
 
 
 def build_model_mapping(models: Iterable[str]) -> dict[str, str]:
-    return {model: model for model in sorted(set(models))}
+    return {model: model for model in _normalize_models(models)}
 
 
 def parse_group_ids(raw: str | None) -> list[int]:
@@ -88,7 +105,7 @@ def build_newapi_channel_payload(
     payload["type"] = provider_to_newapi_type(channel.provider_type)
     payload["key"] = channel.api_key
     payload["base_url"] = channel.base_url
-    payload["models"] = ",".join(sorted(set(models)))
+    payload["models"] = ",".join(_normalize_models(models))
     payload["test_model"] = channel.probe_model or ""
     payload["status"] = 1 if channel.enabled else 2
     payload.setdefault("group", "default")
@@ -128,7 +145,7 @@ def build_sub2api_account_payload(
 def redact_sensitive(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: "[REDACTED]" if str(key).lower() in SENSITIVE_KEYS else redact_sensitive(item)
+            key: "[REDACTED]" if _normalize_sensitive_key(key) in SENSITIVE_KEYS else redact_sensitive(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
