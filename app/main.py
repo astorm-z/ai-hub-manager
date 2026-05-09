@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import NO_VALUE, set_committed_value
 
 from app.config import settings
 from app.database import get_db, init_db
@@ -26,9 +28,37 @@ from app.services.sync_clients import SyncClientError, client_for_target
 from app.time_utils import format_dt
 
 
+SAFE_SYNC_VALUE_ERRORS = (
+    "目标站点已存在同名对象，请先手动改名或删除后再导入。",
+    "目标站点未启用。",
+    "该渠道已绑定此同步目标。",
+)
+
+
+def sync_error_display_message(message: str | None) -> str:
+    if not message:
+        return "目标站点同步失败。"
+    match = re.search(r"\bHTTP\s+(\d{3})\b", message, flags=re.IGNORECASE)
+    if match:
+        return f"目标站点同步失败：HTTP {match.group(1)}"
+    match = re.search(r"\bstatus[_ ]?code['\"]?\s*[:=]\s*['\"]?(\d{3})\b", message, flags=re.IGNORECASE)
+    if match:
+        return f"目标站点同步失败：HTTP {match.group(1)}"
+    return "目标站点同步失败。"
+
+
+def sync_create_error_display_message(message: str | None) -> str:
+    if not message:
+        return "目标站点同步失败。"
+    if message in SAFE_SYNC_VALUE_ERRORS or "分组 ID" in message:
+        return message
+    return sync_error_display_message(message)
+
+
 app = FastAPI(title=settings.app_name)
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["format_dt"] = format_dt
+templates.env.filters["sync_error"] = sync_error_display_message
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
@@ -261,10 +291,11 @@ async def update_channel(
     channel.openai_test_mode = openai_test_mode
     channel.extractor_template_id = _optional_int(extractor_template_id)
     channel.extractor_vars_json = extractor_vars_json or "{}"
-    redirect_path = f"/channels/{channel.id}"
-    sync_channel = SimpleNamespace(id=channel.id)
+    channel_id_value = channel.id
+    redirect_path = f"/channels/{channel_id_value}"
     db.commit()
-    success, failed = await sync_channel_links(db, sync_channel, action="auto_update")
+    set_committed_value(channel, "id", channel_id_value)
+    success, failed = await sync_channel_links(db, channel, action="auto_update")
     if failed > 0:
         return flash_redirect(redirect_path, f"渠道已保存；同步成功 {success} 个，失败 {failed} 个。", "error")
     if success > 0:
@@ -283,11 +314,12 @@ def delete_channel(channel_id: int, db: Annotated[Session, Depends(get_db)], use
 @app.post("/channels/{channel_id}/refresh-models")
 async def refresh_models(channel_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
     channel = _get_channel(db, channel_id)
-    redirect_path = f"/channels/{channel.id}"
-    sync_channel = SimpleNamespace(id=channel.id)
+    channel_id_value = channel.id
+    redirect_path = f"/channels/{channel_id_value}"
     result = await refresh_channel_models(db, channel)
     if result.success:
-        await sync_channel_links(db, sync_channel, action="auto_update")
+        set_committed_value(channel, "id", channel_id_value)
+        await sync_channel_links(db, channel, action="auto_update")
     level = "success" if result.success else "error"
     return flash_redirect(redirect_path, result.message, level)
 
@@ -307,7 +339,7 @@ async def create_sync_link(
     try:
         await create_channel_sync_link(db, channel, target, sub2api_group_ids, sub2api_priority, sub2api_concurrency)
     except ValueError as exc:
-        return flash_redirect(f"/channels/{channel.id}", str(exc), "error")
+        return flash_redirect(f"/channels/{channel.id}", sync_create_error_display_message(str(exc)), "error")
     return flash_redirect(f"/channels/{channel.id}", "目标站点导入成功。")
 
 
@@ -316,7 +348,14 @@ async def sync_channel_link(channel_id: int, link_id: int, db: Annotated[Session
     link = _get_channel_sync_link(db, channel_id, link_id)
     if await sync_existing_link(db, link, action="manual_update"):
         return flash_redirect(f"/channels/{channel_id}", "同步成功。")
-    return flash_redirect(f"/channels/{channel_id}", str(link.__dict__.get("last_sync_error") or "同步失败。"), "error")
+    loaded_value = inspect(link).attrs.last_sync_error.loaded_value
+    last_sync_error = None if loaded_value is NO_VALUE else loaded_value
+    try:
+        db.refresh(link)
+        last_sync_error = link.last_sync_error
+    except SQLAlchemyError:
+        pass
+    return flash_redirect(f"/channels/{channel_id}", sync_error_display_message(last_sync_error), "error")
 
 
 @app.post("/channels/{channel_id}/sync-links/{link_id}/toggle")

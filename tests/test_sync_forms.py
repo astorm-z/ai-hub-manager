@@ -3,6 +3,7 @@ from base64 import urlsafe_b64decode
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.database import get_db
 from app.main import app, build_sync_target_config, channel_sync_context, sync_target_form_from_item
@@ -386,6 +387,77 @@ def test_channel_detail_renders_sync_panel(db_session):
     assert response.status_code == 200
     assert "渠道同步" in response.text
     assert "导入目标站点" in response.text
+
+
+def test_manual_sync_failure_flash_sanitizes_remote_error(db_session, monkeypatch):
+    async def fake_sync_existing_link(db, link, *, action):
+        link.last_sync_error = "HTTP 500 Authorization: Bearer secret password=hunter2"
+        db.commit()
+        set_committed_value(link, "last_sync_error", "HTTP 500 Authorization: Bearer secret password=hunter2")
+        return False
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.flush()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42")
+    db_session.add(link)
+    db_session.commit()
+    monkeypatch.setattr("app.main.sync_existing_link", fake_sync_existing_link)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links/{link.id}/sync",
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert flash["message"] == "目标站点同步失败：HTTP 500"
+    assert "secret" not in flash["message"]
+    assert "Authorization" not in flash["message"]
+    assert "password" not in flash["message"]
+    assert "hunter2" not in flash["message"]
+
+
+def test_channel_detail_panel_sanitizes_sync_error(db_session):
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.flush()
+    db_session.add(AlertRule(channel_id=channel.id))
+    db_session.add(
+        ChannelSyncLink(
+            channel_id=channel.id,
+            target_id=target.id,
+            remote_type="account",
+            remote_id="42",
+            last_sync_status="failed",
+            last_sync_error="HTTP 503 Authorization: Bearer secret password=hunter2",
+        )
+    )
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/channels/{channel.id}",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert "目标站点同步失败：HTTP 503" in response.text
+    assert "secret" not in response.text
+    assert "Authorization" not in response.text
+    assert "password" not in response.text
+    assert "hunter2" not in response.text
 
 
 def _client_with_db(db_session):

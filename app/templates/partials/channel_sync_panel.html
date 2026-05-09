@@ -39,7 +39,7 @@
               <span class="badge warning">未同步</span>
             {% endif %}
             {% if link.last_sync_error %}
-              <div class="muted small">{{ link.last_sync_error }}</div>
+              <div class="muted small">{{ link.last_sync_error|sync_error }}</div>
             {% endif %}
           </td>
           <td>{{ link.last_synced_at|format_dt if link.last_synced_at else "-" }}</td>
