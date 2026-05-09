@@ -61,6 +61,18 @@ class FakeSensitiveErrorClient:
         )
 
 
+class FakeLeakyUpdateErrorClient:
+    async def get_account(self, remote_id):
+        return {"id": int(remote_id), "credentials": {"keep": "value"}}
+
+    async def update_account(self, remote_id, payload):
+        raise SyncClientError(
+            "HTTP 500 Authorization: Bearer secret password=hunter2",
+            status_code=500,
+            response={"message": "bad"},
+        )
+
+
 class RoutingClient:
     def __init__(self):
         self.updated = []
@@ -152,7 +164,7 @@ async def test_sync_failure_updates_link_error_without_raising(db_session):
 
     assert not result
     assert link.last_sync_status == "failed"
-    assert "update failed" in link.last_sync_error
+    assert link.last_sync_error == "目标站点同步失败：HTTP 500"
     assert db_session.query(SyncEvent).filter(SyncEvent.success.is_(False)).count() == 1
 
 
@@ -291,6 +303,43 @@ def test_record_sync_event_redacts_request_and_response_payloads(db_session):
     assert "sk-live" not in response
     assert "Bearer secret" not in response
     assert "hunter2" not in response
+
+
+@pytest.mark.asyncio
+async def test_sync_failure_message_is_sanitized_before_persisting(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42", remote_name="union_main")
+    db_session.add(link)
+    db_session.commit()
+
+    result = await sync_existing_link(db_session, link, client=FakeLeakyUpdateErrorClient(), action="manual_update")
+
+    assert not result
+    event = db_session.query(SyncEvent).filter(SyncEvent.success.is_(False)).one()
+    persisted = f"{link.last_sync_error} {event.message}"
+    assert "HTTP 500" in persisted
+    assert "Authorization" not in persisted
+    assert "secret" not in persisted
+    assert "password" not in persisted
+    assert "hunter2" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_create_sub2api_link_rejects_invalid_priority_and_concurrency(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="优先级"):
+        await create_channel_sync_link(db_session, channel, target, "", -1, 3, client=FakeSub2APIClient())
+    with pytest.raises(ValueError, match="并发"):
+        await create_channel_sync_link(db_session, channel, target, "", 50, 0, client=FakeSub2APIClient())
+
+    assert db_session.query(ChannelSyncLink).count() == 0
 
 
 @pytest.mark.asyncio

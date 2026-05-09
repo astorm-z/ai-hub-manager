@@ -17,6 +17,16 @@ from app.services.sync_payloads import (
 
 
 SAME_NAME_ERROR = "目标站点已存在同名对象，请先手动改名或删除后再导入。"
+SAFE_ERROR_MESSAGES = {
+    SAME_NAME_ERROR,
+    "目标站点未启用。",
+    "该渠道已绑定此同步目标。",
+    "分组 ID 必须是字符串或整数列表",
+    "分组 ID 必须是整数列表",
+    "分组 ID 必须是正整数",
+    "sub2api 优先级必须大于或等于 0。",
+    "sub2api 并发必须大于 0。",
+}
 STRING_SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)([^\s,&;\"'}]+)"),
     re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([^\s,&;\"'}]+)"),
@@ -80,6 +90,21 @@ def _dump_event_json(value: Any) -> str | None:
         return None
     safe_value = _redact_secret_strings(redact_sensitive(_json_safe(value)))
     return json.dumps(safe_value, ensure_ascii=False)
+
+
+def _safe_error_message(message: str | None, status_code: int | None = None) -> str | None:
+    if not message:
+        return None
+    if message in SAFE_ERROR_MESSAGES:
+        return message
+    if message.startswith("远端对象类型与目标站点类型不匹配："):
+        return message
+    http_match = re.search(r"\bHTTP\s+(\d{3})\b", message, flags=re.IGNORECASE)
+    if http_match:
+        return f"目标站点同步失败：HTTP {http_match.group(1)}"
+    if status_code is not None:
+        return f"目标站点同步失败：HTTP {status_code}"
+    return "目标站点同步失败。"
 
 
 def record_sync_event(
@@ -155,6 +180,13 @@ def _validate_link_target_type(link: ChannelSyncLink) -> None:
         )
 
 
+def _validate_sub2api_link_settings(priority: int, concurrency: int) -> None:
+    if priority < 0:
+        raise ValueError("sub2api 优先级必须大于或等于 0。")
+    if concurrency <= 0:
+        raise ValueError("sub2api 并发必须大于 0。")
+
+
 async def create_channel_sync_link(
     db: Any,
     channel: Channel,
@@ -175,6 +207,7 @@ async def create_channel_sync_link(
             raise ValueError("该渠道已绑定此同步目标。")
 
         group_id_values = parse_group_ids(group_ids)
+        _validate_sub2api_link_settings(priority, concurrency)
         link = ChannelSyncLink(
             channel_id=channel.id,
             target_id=target.id,
@@ -234,18 +267,20 @@ async def create_channel_sync_link(
         db.refresh(link)
         return link
     except ValueError as exc:
+        safe_message = _safe_error_message(str(exc))
         record_sync_event(
             db,
             channel_id=channel.id,
             target_id=target.id,
             action="import_create",
             success=False,
-            message=str(exc),
+            message=safe_message,
             request_payload=request_payload,
         )
         db.commit()
         raise
     except SyncClientError as exc:
+        safe_message = _safe_error_message(str(exc), exc.status_code)
         record_sync_event(
             db,
             channel_id=channel.id,
@@ -253,7 +288,7 @@ async def create_channel_sync_link(
             action="import_create",
             success=False,
             status_code=exc.status_code,
-            message=str(exc),
+            message=safe_message,
             request_payload=request_payload,
             response_payload=exc.response,
         )
@@ -319,8 +354,10 @@ async def sync_existing_link(
         db.commit()
         return True
     except (SyncClientError, ValueError) as exc:
+        status_code = exc.status_code if isinstance(exc, SyncClientError) else None
+        safe_message = _safe_error_message(str(exc), status_code)
         link.last_sync_status = "failed"
-        link.last_sync_error = str(exc)
+        link.last_sync_error = safe_message
         record_sync_event(
             db,
             channel_id=link.channel_id,
@@ -328,8 +365,8 @@ async def sync_existing_link(
             link_id=link.id,
             action=action,
             success=False,
-            status_code=exc.status_code if isinstance(exc, SyncClientError) else None,
-            message=str(exc),
+            status_code=status_code,
+            message=safe_message,
             request_payload=request_payload,
             response_payload=exc.response if isinstance(exc, SyncClientError) else None,
         )
