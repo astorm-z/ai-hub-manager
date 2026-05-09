@@ -490,6 +490,37 @@ def test_channel_detail_panel_sanitizes_sync_error(db_session):
     assert "hunter2" not in response.text
 
 
+def test_create_sync_link_shows_local_sub2api_setting_errors(db_session, monkeypatch):
+    async def fake_create_channel_sync_link(*args, **kwargs):
+        raise ValueError("sub2api 并发必须大于 0。")
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.commit()
+    monkeypatch.setattr("app.main.create_channel_sync_link", fake_create_channel_sync_link)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links",
+            data={
+                "target_id": str(target.id),
+                "sub2api_group_ids": "",
+                "sub2api_priority": "50",
+                "sub2api_concurrency": "0",
+            },
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert flash["message"] == "sub2api 并发必须大于 0。"
+
+
 def _client_with_db(db_session):
     def override_get_db():
         yield db_session
