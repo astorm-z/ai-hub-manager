@@ -11,14 +11,16 @@ from app.models import Channel, ChannelSyncLink, SyncTarget
 NEW_API_OPENAI_TYPE = 1
 NEW_API_ANTHROPIC_TYPE = 14
 SENSITIVE_KEYS = {
-    "accesstoken",
-    "adminapikey",
-    "apikey",
+    "access_token",
+    "admin_api_key",
+    "api-key",
+    "api_key",
+    "apiKey",
     "authorization",
     "key",
     "password",
-    "refreshtoken",
-    "xapikey",
+    "refresh_token",
+    "x-api-key",
 }
 
 
@@ -28,6 +30,9 @@ def _normalize_models(models: Iterable[str]) -> list[str]:
 
 def _normalize_sensitive_key(key: Any) -> str:
     return str(key).lower().replace("_", "").replace("-", "")
+
+
+NORMALIZED_SENSITIVE_KEYS = {_normalize_sensitive_key(key) for key in SENSITIVE_KEYS}
 
 
 def build_remote_name(target: SyncTarget, channel: Channel) -> str:
@@ -145,7 +150,7 @@ def build_sub2api_account_payload(
 def redact_sensitive(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: "[REDACTED]" if _normalize_sensitive_key(key) in SENSITIVE_KEYS else redact_sensitive(item)
+            key: "[REDACTED]" if _normalize_sensitive_key(key) in NORMALIZED_SENSITIVE_KEYS else redact_sensitive(item)
             for key, item in value.items()
         }
     if isinstance(value, list):

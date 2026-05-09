@@ -4,6 +4,7 @@ import pytest
 
 from app.models import Channel, ChannelSyncLink, SyncTarget
 from app.services.sync_payloads import (
+    SENSITIVE_KEYS,
     build_model_mapping,
     build_newapi_channel_payload,
     build_remote_name,
@@ -109,6 +110,13 @@ def test_group_id_parser_rejects_invalid_values():
 
 def test_build_model_mapping_sorts_deduplicates_and_ignores_blank_values():
     assert build_model_mapping([" b ", "a", "a", "", " "]) == {"a": "a", "b": "b"}
+
+
+def test_sensitive_keys_exposes_required_raw_key_names():
+    assert "api_key" in SENSITIVE_KEYS
+    assert "key" in SENSITIVE_KEYS
+    assert "authorization" in SENSITIVE_KEYS
+    assert "admin_api_key" in SENSITIVE_KEYS
 
 
 def test_sub2api_payload_preserves_existing_fields_without_mutating_input():
