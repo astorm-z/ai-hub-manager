@@ -44,6 +44,7 @@ class Channel(Base):
     health_checks: Mapped[list["HealthCheck"]] = relationship(cascade="all, delete-orphan", back_populates="channel")
     balances: Mapped[list["BalanceSnapshot"]] = relationship(cascade="all, delete-orphan", back_populates="channel")
     alert_rules: Mapped[list["AlertRule"]] = relationship(cascade="all, delete-orphan", back_populates="channel")
+    sync_links: Mapped[list["ChannelSyncLink"]] = relationship(cascade="all, delete-orphan", back_populates="channel")
     extractor_template: Mapped["ExtractorTemplate | None"] = relationship()
 
 
@@ -129,6 +130,63 @@ class NotificationChannel(Base):
     channel_type: Mapped[str] = mapped_column(String(32), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     config_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
+
+
+class SyncTarget(Base):
+    __tablename__ = "sync_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    name_prefix: Mapped[str] = mapped_column(String(80), default="union_", nullable=False)
+    auth_config_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    default_config_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, onupdate=now_utc, nullable=False)
+
+    sync_links: Mapped[list["ChannelSyncLink"]] = relationship(cascade="all, delete-orphan", back_populates="target")
+
+
+class ChannelSyncLink(Base):
+    __tablename__ = "channel_sync_links"
+    __table_args__ = (UniqueConstraint("channel_id", "target_id", name="uq_channel_sync_target"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    target_id: Mapped[int] = mapped_column(ForeignKey("sync_targets.id"), nullable=False)
+    remote_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    remote_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    remote_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sync_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sub2api_group_ids_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    sub2api_priority: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    sub2api_concurrency: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    last_sync_status: Mapped[str] = mapped_column(String(32), default="never", nullable=False)
+    last_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, onupdate=now_utc, nullable=False)
+
+    channel: Mapped[Channel] = relationship(back_populates="sync_links")
+    target: Mapped[SyncTarget] = relationship(back_populates="sync_links")
+
+
+class SyncEvent(Base):
+    __tablename__ = "sync_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("channels.id", ondelete="SET NULL"), nullable=True)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("sync_targets.id", ondelete="SET NULL"), nullable=True)
+    link_id: Mapped[int | None] = mapped_column(ForeignKey("channel_sync_links.id", ondelete="SET NULL"), nullable=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
 
 
