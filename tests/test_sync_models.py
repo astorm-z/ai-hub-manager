@@ -84,3 +84,7 @@ def test_deleting_channel_removes_local_links_not_events(db_session):
 
     assert db_session.query(ChannelSyncLink).count() == 0
     assert db_session.query(SyncEvent).count() == 1
+    stored_event = db_session.query(SyncEvent).one()
+    assert stored_event.channel_id is None
+    assert stored_event.link_id is None
+    assert stored_event.target_id == target.id
