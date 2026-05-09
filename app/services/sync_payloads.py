@@ -29,7 +29,8 @@ def parse_group_ids(raw: str | None) -> list[int]:
     if not text:
         return []
 
-    if text.startswith("["):
+    from_json = text.startswith("[")
+    if from_json:
         try:
             values = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -42,12 +43,17 @@ def parse_group_ids(raw: str | None) -> list[int]:
 
     group_ids: list[int] = []
     for value in values:
-        if isinstance(value, bool):
-            raise ValueError("分组 ID 必须是整数")
-        try:
-            group_ids.append(int(value))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("分组 ID 必须是整数") from exc
+        if from_json:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("分组 ID 必须是正整数")
+            group_id = value
+        else:
+            if not isinstance(value, str) or not value.isdecimal():
+                raise ValueError("分组 ID 必须是正整数")
+            group_id = int(value)
+        if group_id <= 0:
+            raise ValueError("分组 ID 必须是正整数")
+        group_ids.append(group_id)
     return group_ids
 
 

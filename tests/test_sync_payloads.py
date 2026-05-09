@@ -97,8 +97,9 @@ def test_group_id_parser_accepts_commas_and_json():
 
 
 def test_group_id_parser_rejects_invalid_values():
-    with pytest.raises(ValueError, match="分组 ID"):
-        parse_group_ids("1,a")
+    for raw in ("1,a", "0", "-1", "[0]", "[-1]", "[1.2]"):
+        with pytest.raises(ValueError, match="分组 ID"):
+            parse_group_ids(raw)
 
 
 def test_build_model_mapping_sorts_and_deduplicates():
