@@ -32,6 +32,9 @@ SAFE_SYNC_VALUE_ERRORS = (
     "目标站点已存在同名对象，请先手动改名或删除后再导入。",
     "目标站点未启用。",
     "该渠道已绑定此同步目标。",
+    "分组 ID 必须是字符串或整数列表",
+    "分组 ID 必须是整数列表",
+    "分组 ID 必须是正整数",
 )
 
 
@@ -50,7 +53,7 @@ def sync_error_display_message(message: str | None) -> str:
 def sync_create_error_display_message(message: str | None) -> str:
     if not message:
         return "目标站点同步失败。"
-    if message in SAFE_SYNC_VALUE_ERRORS or "分组 ID" in message:
+    if message in SAFE_SYNC_VALUE_ERRORS:
         return message
     return sync_error_display_message(message)
 

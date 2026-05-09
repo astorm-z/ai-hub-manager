@@ -424,6 +424,36 @@ def test_manual_sync_failure_flash_sanitizes_remote_error(db_session, monkeypatc
     assert "hunter2" not in flash["message"]
 
 
+def test_create_sync_link_rejects_leaky_group_id_like_remote_error(db_session, monkeypatch):
+    async def fake_create_channel_sync_link(*args, **kwargs):
+        raise ValueError("分组 ID Authorization: Bearer secret password=hunter2")
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.commit()
+    monkeypatch.setattr("app.main.create_channel_sync_link", fake_create_channel_sync_link)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links",
+            data={"target_id": str(target.id), "sub2api_group_ids": "1"},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert flash["message"] == "目标站点同步失败。"
+    assert "secret" not in flash["message"]
+    assert "Authorization" not in flash["message"]
+    assert "password" not in flash["message"]
+    assert "hunter2" not in flash["message"]
+
+
 def test_channel_detail_panel_sanitizes_sync_error(db_session):
     user = User(username="admin", password_hash="hash")
     channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
