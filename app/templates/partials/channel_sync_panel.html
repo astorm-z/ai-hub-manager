@@ -1,0 +1,123 @@
+<section class="panel">
+  <div class="panel-heading">
+    <div>
+      <h2>渠道同步</h2>
+      <p class="muted">将当前渠道导入到启用的目标站点，并在渠道保存或模型刷新成功后自动同步。</p>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>目标站点</th>
+        <th>远端对象</th>
+        <th>状态</th>
+        <th>最近同步</th>
+        <th>sub2api 配置</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for link in sync_links %}
+        <tr>
+          <td>
+            {{ link.target.name }}
+            <div class="muted small">{{ "new-api" if link.target.target_type == "new_api" else "sub2api" }}</div>
+          </td>
+          <td>
+            {{ link.remote_name or "-" }}
+            <div class="muted small">ID：{{ link.remote_id or "-" }}</div>
+          </td>
+          <td>
+            {% if not link.sync_enabled %}
+              <span class="badge">暂停</span>
+            {% elif link.last_sync_status == "success" %}
+              <span class="badge success">成功</span>
+            {% elif link.last_sync_status == "failed" %}
+              <span class="badge error">失败</span>
+            {% else %}
+              <span class="badge warning">未同步</span>
+            {% endif %}
+            {% if link.last_sync_error %}
+              <div class="muted small">{{ link.last_sync_error }}</div>
+            {% endif %}
+          </td>
+          <td>{{ link.last_synced_at|format_dt if link.last_synced_at else "-" }}</td>
+          <td>
+            {% if link.target.target_type == "sub2api" %}
+              <div class="small">分组：{{ link.sub2api_group_ids_json }}</div>
+              <div class="small">优先级：{{ link.sub2api_priority }}</div>
+              <div class="small">并发：{{ link.sub2api_concurrency }}</div>
+            {% else %}
+              <span class="muted">不适用</span>
+            {% endif %}
+          </td>
+          <td>
+            <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/sync">
+              <button class="secondary" type="submit">同步</button>
+            </form>
+            <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/toggle">
+              <button class="secondary" type="submit">{{ "暂停" if link.sync_enabled else "恢复" }}</button>
+            </form>
+            <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/delete" onsubmit="return confirm('确定删除本地同步关联吗？远端对象不会删除。');">
+              <button class="danger" type="submit">删除关联</button>
+            </form>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="muted">暂无同步关联。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>导入到目标站点</h3>
+  <form method="post" action="/channels/{{ channel.id }}/sync-links" class="channel-sync-form">
+    <div class="form-grid">
+      <div class="field">
+        <label for="sync_target_id">目标站点</label>
+        <select id="sync_target_id" name="target_id" class="channel-sync-target" {% if sync_targets|selectattr("id", "in", linked_target_ids)|list|length == sync_targets|length %}disabled{% endif %} required>
+          {% for target in sync_targets %}
+            {% if target.id not in linked_target_ids %}
+              <option value="{{ target.id }}" data-target-type="{{ target.target_type }}">{{ target.name }}（{{ "new-api" if target.target_type == "new_api" else "sub2api" }}）</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field channel-sync-sub2api">
+        <label for="sub2api_group_ids">sub2api 分组 ID</label>
+        <input id="sub2api_group_ids" name="sub2api_group_ids" placeholder="例如：1,2">
+      </div>
+      <div class="field channel-sync-sub2api">
+        <label for="sub2api_priority">sub2api 优先级</label>
+        <input id="sub2api_priority" name="sub2api_priority" type="number" min="0" value="50">
+      </div>
+      <div class="field channel-sync-sub2api">
+        <label for="sub2api_concurrency">sub2api 并发</label>
+        <input id="sub2api_concurrency" name="sub2api_concurrency" type="number" min="1" value="3">
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit" {% if sync_targets|selectattr("id", "in", linked_target_ids)|list|length == sync_targets|length %}disabled{% endif %}>导入目标站点</button>
+    </div>
+  </form>
+</section>
+
+<script>
+  document.querySelectorAll(".channel-sync-form").forEach((form) => {
+    const targetSelect = form.querySelector(".channel-sync-target");
+    const updateSub2APIFields = () => {
+      const selected = targetSelect && targetSelect.selectedOptions.length ? targetSelect.selectedOptions[0] : null;
+      const visible = selected ? selected.dataset.targetType === "sub2api" : false;
+      form.querySelectorAll(".channel-sync-sub2api").forEach((node) => {
+        node.style.display = visible ? "" : "none";
+        node.querySelectorAll("input, select, textarea").forEach((field) => {
+          field.disabled = !visible;
+        });
+      });
+    };
+    if (targetSelect) {
+      targetSelect.addEventListener("change", updateSub2APIFields);
+    }
+    updateSub2APIFields();
+  });
+</script>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
@@ -20,6 +21,7 @@ from app.services.extractors import query_channel_balance, seed_builtin_extracto
 from app.services.monitoring import ensure_default_alert_rule, latest_balance, probe_channel_model, recent_status, refresh_channel_balance, refresh_channel_models
 from app.services.notifications import send_notification
 from app.services.scheduler import start_scheduler, stop_scheduler
+from app.services.channel_sync import create_channel_sync_link, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, client_for_target
 from app.time_utils import format_dt
 
@@ -220,11 +222,13 @@ def channel_detail(request: Request, channel_id: int, db: Annotated[Session, Dep
     checks = db.query(HealthCheck).filter(HealthCheck.channel_id == channel.id).order_by(HealthCheck.created_at.desc()).limit(15).all()
     balances = db.query(BalanceSnapshot).filter(BalanceSnapshot.channel_id == channel.id).order_by(BalanceSnapshot.created_at.desc()).limit(10).all()
     check_rows = build_check_rows(db, checks)
-    return render(request, "channel_detail.html", {"channel": channel, "extractors": extractors, "rule": rule, "models": models, "checks": check_rows, "balances": balances, "user": user})
+    context = {"channel": channel, "extractors": extractors, "rule": rule, "models": models, "checks": check_rows, "balances": balances, "user": user}
+    context.update(channel_sync_context(db, channel))
+    return render(request, "channel_detail.html", context)
 
 
 @app.post("/channels/{channel_id}")
-def update_channel(
+async def update_channel(
     channel_id: int,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
@@ -257,8 +261,15 @@ def update_channel(
     channel.openai_test_mode = openai_test_mode
     channel.extractor_template_id = _optional_int(extractor_template_id)
     channel.extractor_vars_json = extractor_vars_json or "{}"
+    redirect_path = f"/channels/{channel.id}"
+    sync_channel = SimpleNamespace(id=channel.id)
     db.commit()
-    return flash_redirect(f"/channels/{channel.id}", "渠道已保存。")
+    success, failed = await sync_channel_links(db, sync_channel, action="auto_update")
+    if failed > 0:
+        return flash_redirect(redirect_path, f"渠道已保存；同步成功 {success} 个，失败 {failed} 个。", "error")
+    if success > 0:
+        return flash_redirect(redirect_path, f"渠道已保存；已同步 {success} 个目标。")
+    return flash_redirect(redirect_path, "渠道已保存。")
 
 
 @app.post("/channels/{channel_id}/delete")
@@ -272,9 +283,57 @@ def delete_channel(channel_id: int, db: Annotated[Session, Depends(get_db)], use
 @app.post("/channels/{channel_id}/refresh-models")
 async def refresh_models(channel_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
     channel = _get_channel(db, channel_id)
+    redirect_path = f"/channels/{channel.id}"
+    sync_channel = SimpleNamespace(id=channel.id)
     result = await refresh_channel_models(db, channel)
+    if result.success:
+        await sync_channel_links(db, sync_channel, action="auto_update")
     level = "success" if result.success else "error"
-    return flash_redirect(f"/channels/{channel.id}", result.message, level)
+    return flash_redirect(redirect_path, result.message, level)
+
+
+@app.post("/channels/{channel_id}/sync-links")
+async def create_sync_link(
+    channel_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    target_id: Annotated[int, Form()],
+    sub2api_group_ids: Annotated[str, Form()] = "",
+    sub2api_priority: Annotated[int, Form()] = 50,
+    sub2api_concurrency: Annotated[int, Form()] = 3,
+) -> RedirectResponse:
+    channel = _get_channel(db, channel_id)
+    target = _get_sync_target(db, target_id)
+    try:
+        await create_channel_sync_link(db, channel, target, sub2api_group_ids, sub2api_priority, sub2api_concurrency)
+    except ValueError as exc:
+        return flash_redirect(f"/channels/{channel.id}", str(exc), "error")
+    return flash_redirect(f"/channels/{channel.id}", "目标站点导入成功。")
+
+
+@app.post("/channels/{channel_id}/sync-links/{link_id}/sync")
+async def sync_channel_link(channel_id: int, link_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
+    link = _get_channel_sync_link(db, channel_id, link_id)
+    if await sync_existing_link(db, link, action="manual_update"):
+        return flash_redirect(f"/channels/{channel_id}", "同步成功。")
+    return flash_redirect(f"/channels/{channel_id}", str(link.__dict__.get("last_sync_error") or "同步失败。"), "error")
+
+
+@app.post("/channels/{channel_id}/sync-links/{link_id}/toggle")
+def toggle_channel_sync_link(channel_id: int, link_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
+    link = _get_channel_sync_link(db, channel_id, link_id)
+    link.sync_enabled = not link.sync_enabled
+    message = "同步关联已恢复。" if link.sync_enabled else "同步关联已暂停。"
+    db.commit()
+    return flash_redirect(f"/channels/{channel_id}", message)
+
+
+@app.post("/channels/{channel_id}/sync-links/{link_id}/delete")
+def delete_channel_sync_link(channel_id: int, link_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
+    link = _get_channel_sync_link(db, channel_id, link_id)
+    db.delete(link)
+    db.commit()
+    return flash_redirect(f"/channels/{channel_id}", "同步关联已删除；远端对象未删除。")
 
 
 @app.post("/channels/{channel_id}/test-model")
@@ -634,6 +693,21 @@ def build_check_rows(db: Session, checks: list[HealthCheck]) -> list[dict[str, A
     return [{"check": item, "balance": find_balance_for_check(db, item) if item.check_type == "balance" else None} for item in checks]
 
 
+def channel_sync_context(db: Session, channel: Channel) -> dict[str, Any]:
+    sync_targets = db.query(SyncTarget).filter(SyncTarget.enabled.is_(True)).order_by(SyncTarget.name).all()
+    sync_links = (
+        db.query(ChannelSyncLink)
+        .filter(ChannelSyncLink.channel_id == channel.id)
+        .order_by(ChannelSyncLink.created_at.desc())
+        .all()
+    )
+    return {
+        "sync_targets": sync_targets,
+        "sync_links": sync_links,
+        "linked_target_ids": {link.target_id for link in sync_links},
+    }
+
+
 def find_balance_for_check(db: Session, check: HealthCheck) -> BalanceSnapshot | None:
     window_start = check.created_at - timedelta(seconds=5)
     window_end = check.created_at + timedelta(seconds=5)
@@ -749,6 +823,13 @@ def _get_channel(db: Session, channel_id: int) -> Channel:
     if not channel:
         raise HTTPException(status_code=404)
     return channel
+
+
+def _get_channel_sync_link(db: Session, channel_id: int, link_id: int) -> ChannelSyncLink:
+    link = db.get(ChannelSyncLink, link_id)
+    if not link or link.channel_id != channel_id:
+        raise HTTPException(status_code=404)
+    return link
 
 
 def mark_all_alerts_acknowledged(db: Session) -> int:
