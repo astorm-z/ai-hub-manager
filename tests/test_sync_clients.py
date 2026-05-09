@@ -245,6 +245,13 @@ def test_missing_admin_api_key_raises_sync_client_error():
         client.headers()
 
 
+def test_blank_admin_api_key_raises_sync_client_error():
+    client = Sub2APIClient(sub2api_target(json.dumps({"admin_api_key": "   "})))
+
+    with pytest.raises(SyncClientError, match="admin_api_key"):
+        client.headers()
+
+
 @pytest.mark.parametrize(
     "raw_auth, expected",
     [
@@ -257,6 +264,44 @@ def test_missing_newapi_auth_raises_sync_client_error(raw_auth: str, expected: s
 
     with pytest.raises(SyncClientError, match=expected):
         client.headers()
+
+
+@pytest.mark.parametrize(
+    "raw_auth, expected",
+    [
+        (json.dumps({"authorization": "   ", "new_api_user": "1"}), "authorization"),
+        (json.dumps({"authorization": "Bearer token", "new_api_user": "   "}), "new_api_user"),
+    ],
+)
+def test_blank_newapi_auth_raises_sync_client_error(raw_auth: str, expected: str):
+    client = NewAPIClient(newapi_target(raw_auth))
+
+    with pytest.raises(SyncClientError, match=expected):
+        client.headers()
+
+
+@pytest.mark.asyncio
+async def test_sub2api_test_connection_uses_page_size_one():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["page"] == "1"
+        assert request.url.params["page_size"] == "1"
+        return httpx.Response(200, json={"code": 0, "data": {"items": []}})
+
+    client = Sub2APIClient(sub2api_target(), transport=httpx.MockTransport(handler))
+
+    await client.test_connection()
+
+
+@pytest.mark.asyncio
+async def test_newapi_test_connection_uses_page_size_one():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["p"] == "1"
+        assert request.url.params["page_size"] == "1"
+        return httpx.Response(200, json={"success": True, "data": {"items": []}})
+
+    client = NewAPIClient(newapi_target(), transport=httpx.MockTransport(handler))
+
+    await client.test_connection()
 
 
 @pytest.mark.asyncio
@@ -333,3 +378,10 @@ def test_client_factory_selects_target_type():
 
     assert isinstance(client_for_target(sub), Sub2APIClient)
     assert isinstance(client_for_target(new), NewAPIClient)
+
+
+def test_client_factory_rejects_unknown_target_type():
+    target = SyncTarget(name="other", target_type="other", base_url="https://other.test", auth_config_json="{}")
+
+    with pytest.raises(SyncClientError, match="未知同步目标类型"):
+        client_for_target(target)

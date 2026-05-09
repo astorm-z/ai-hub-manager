@@ -113,10 +113,10 @@ class BaseTargetClient:
 
 class Sub2APIClient(BaseTargetClient):
     def headers(self) -> dict[str, str]:
-        admin_api_key = self.auth.get("admin_api_key")
+        admin_api_key = str(self.auth.get("admin_api_key") or "").strip()
         if not admin_api_key:
             raise SyncClientError("Sub2API 目标缺少 admin_api_key。")
-        return {"x-api-key": str(admin_api_key)}
+        return {"x-api-key": admin_api_key}
 
     def unwrap_response(self, response: httpx.Response) -> Any:
         data = super().unwrap_response(response)
@@ -128,7 +128,7 @@ class Sub2APIClient(BaseTargetClient):
         return data
 
     async def test_connection(self) -> SyncClientResult:
-        return await self.request("GET", "/api/v1/admin/accounts", params={"page": 1, "page_size": 20})
+        return await self.request("GET", "/api/v1/admin/accounts", params={"page": 1, "page_size": 1})
 
     async def find_account_by_name(self, name: str) -> dict[str, Any] | None:
         page_size = 20
@@ -161,13 +161,13 @@ class Sub2APIClient(BaseTargetClient):
 
 class NewAPIClient(BaseTargetClient):
     def headers(self) -> dict[str, str]:
-        authorization = self.auth.get("authorization")
-        new_api_user = self.auth.get("new_api_user")
+        authorization = str(self.auth.get("authorization") or "").strip()
+        new_api_user = str(self.auth.get("new_api_user") or "").strip()
         if not authorization:
             raise SyncClientError("New API 目标缺少 authorization。")
         if not new_api_user:
             raise SyncClientError("New API 目标缺少 new_api_user。")
-        return {"Authorization": str(authorization), "New-Api-User": str(new_api_user)}
+        return {"Authorization": authorization, "New-Api-User": new_api_user}
 
     def unwrap_response(self, response: httpx.Response) -> Any:
         data = super().unwrap_response(response)
@@ -179,7 +179,7 @@ class NewAPIClient(BaseTargetClient):
         return data
 
     async def test_connection(self) -> SyncClientResult:
-        return await self.request("GET", "/api/channel/", params={"p": 1, "page_size": 20})
+        return await self.request("GET", "/api/channel/", params={"p": 1, "page_size": 1})
 
     async def find_channel_by_name(self, name: str) -> dict[str, Any] | None:
         page_size = 20
