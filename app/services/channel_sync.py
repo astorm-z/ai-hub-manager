@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.models import Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget, now_utc
@@ -16,6 +17,12 @@ from app.services.sync_payloads import (
 
 
 SAME_NAME_ERROR = "目标站点已存在同名对象，请先手动改名或删除后再导入。"
+STRING_SECRET_PATTERNS = (
+    re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)([^\s,&;\"'}]+)"),
+    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([^\s,&;\"'}]+)"),
+    re.compile(r"(?i)(password\s*[=:]\s*)([^\s,&;\"'}]+)"),
+    re.compile(r'(?i)("(?:api[_-]?key|key|password|authorization)"\s*:\s*")([^"]*)(")'),
+)
 
 
 def channel_model_ids(db: Any, channel_id: int) -> list[str]:
@@ -52,10 +59,26 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _redact_secret_strings(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _redact_secret_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_secret_strings(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_secret_strings(item) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    redacted = value
+    for pattern in STRING_SECRET_PATTERNS:
+        redacted = pattern.sub(r"\1[REDACTED]\3" if pattern.groups >= 3 else r"\1[REDACTED]", redacted)
+    return redacted
+
+
 def _dump_event_json(value: Any) -> str | None:
     if value is None:
         return None
-    safe_value = redact_sensitive(_json_safe(value))
+    safe_value = _redact_secret_strings(redact_sensitive(_json_safe(value)))
     return json.dumps(safe_value, ensure_ascii=False)
 
 
@@ -124,6 +147,14 @@ def _remote_type_for_target(target: SyncTarget) -> str:
     raise SyncClientError(f"未知同步目标类型：{target.target_type}")
 
 
+def _validate_link_target_type(link: ChannelSyncLink) -> None:
+    expected_remote_type = _remote_type_for_target(link.target)
+    if link.remote_type != expected_remote_type:
+        raise SyncClientError(
+            f"远端对象类型与目标站点类型不匹配：{link.remote_type} 不适用于 {link.target.target_type}。"
+        )
+
+
 async def create_channel_sync_link(
     db: Any,
     channel: Channel,
@@ -171,8 +202,16 @@ async def create_channel_sync_link(
             if not created:
                 raise SyncClientError("new-api 创建成功但无法查询到新渠道 ID。", response=_result_response(result))
             link.remote_id = _extract_remote_id(created)
+            response_payload = {
+                "create": _result_response(result),
+                "lookup": created,
+                "remote_id": link.remote_id,
+            }
         else:
             raise SyncClientError(f"未知同步目标类型：{target.target_type}")
+
+        if target.target_type != "new_api":
+            response_payload = _result_response(result)
 
         link.last_sync_status = "success"
         link.last_sync_error = None
@@ -189,7 +228,7 @@ async def create_channel_sync_link(
             status_code=_result_status_code(result),
             message="success",
             request_payload=request_payload,
-            response_payload=_result_response(result),
+            response_payload=response_payload,
         )
         db.commit()
         db.refresh(link)
@@ -232,11 +271,13 @@ async def sync_existing_link(
     if not link.sync_enabled or not link.target.enabled or not link.remote_id:
         return True
 
-    target_client = client or client_for_target(link.target)
-    models = channel_model_ids(db, link.channel_id)
     request_payload: Any = None
 
     try:
+        _validate_link_target_type(link)
+        target_client = client or client_for_target(link.target)
+        models = channel_model_ids(db, link.channel_id)
+
         if link.remote_type == "account":
             existing = await target_client.get_account(link.remote_id)
             request_payload = build_sub2api_account_payload(
@@ -277,7 +318,7 @@ async def sync_existing_link(
         )
         db.commit()
         return True
-    except SyncClientError as exc:
+    except (SyncClientError, ValueError) as exc:
         link.last_sync_status = "failed"
         link.last_sync_error = str(exc)
         record_sync_event(
@@ -287,16 +328,16 @@ async def sync_existing_link(
             link_id=link.id,
             action=action,
             success=False,
-            status_code=exc.status_code,
+            status_code=exc.status_code if isinstance(exc, SyncClientError) else None,
             message=str(exc),
             request_payload=request_payload,
-            response_payload=exc.response,
+            response_payload=exc.response if isinstance(exc, SyncClientError) else None,
         )
         db.commit()
         return False
 
 
-async def sync_channel_links(db: Any, channel: Channel, *, action: str = "auto_update") -> tuple[int, int]:
+async def sync_channel_links(db: Any, channel: Channel, *, action: str = "auto_update", client: Any = None) -> tuple[int, int]:
     links = (
         db.query(ChannelSyncLink)
         .filter(
@@ -310,7 +351,7 @@ async def sync_channel_links(db: Any, channel: Channel, *, action: str = "auto_u
     success_count = 0
     failure_count = 0
     for link in links:
-        if await sync_existing_link(db, link, action=action):
+        if await sync_existing_link(db, link, action=action, client=client):
             success_count += 1
         else:
             failure_count += 1

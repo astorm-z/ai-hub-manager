@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.models import Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget
-from app.services.channel_sync import create_channel_sync_link, sync_existing_link
+from app.services.channel_sync import create_channel_sync_link, record_sync_event, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, SyncClientResult
 
 
@@ -50,6 +50,29 @@ class FakeNewAPIClient:
 
     async def update_channel(self, payload):
         return SyncClientResult(200, {"success": True}, {"success": True})
+
+
+class FakeSensitiveErrorClient:
+    async def get_account(self, remote_id):
+        raise SyncClientError(
+            "remote failed",
+            status_code=500,
+            response='api_key=sk-live\nAuthorization: Bearer secret\n{"key":"sk-live"}\npassword: hunter2',
+        )
+
+
+class RoutingClient:
+    def __init__(self):
+        self.updated = []
+
+    async def get_account(self, remote_id):
+        return {"id": int(remote_id), "credentials": {"keep": "value"}}
+
+    async def update_account(self, remote_id, payload):
+        if str(remote_id) == "42":
+            raise SyncClientError("boom", status_code=500, response={"message": "bad"})
+        self.updated.append(str(remote_id))
+        return SyncClientResult(200, {"id": int(remote_id), **payload}, {"ok": True})
 
 
 def _add_channel_with_models(db_session):
@@ -157,3 +180,131 @@ async def test_manual_retry_success_clears_error(db_session):
     assert link.last_sync_status == "success"
     assert link.last_sync_error is None
     assert link.last_synced_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_payload_validation_error_marks_failed_without_raising(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(
+        channel_id=channel.id,
+        target_id=target.id,
+        remote_type="account",
+        remote_id="42",
+        remote_name="union_main",
+        sub2api_group_ids_json="bad",
+    )
+    db_session.add(link)
+    db_session.commit()
+
+    result = await sync_existing_link(db_session, link, client=FakeSub2APIClient(), action="manual_update")
+
+    assert not result
+    assert link.last_sync_status == "failed"
+    assert "分组 ID" in link.last_sync_error
+    event = db_session.query(SyncEvent).filter(SyncEvent.success.is_(False)).one()
+    assert "分组 ID" in event.message
+
+
+@pytest.mark.asyncio
+async def test_sync_link_target_type_mismatch_records_failure(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42", remote_name="union_main")
+    db_session.add(link)
+    db_session.commit()
+
+    result = await sync_existing_link(db_session, link, client=FakeNewAPIClient(), action="manual_update")
+
+    assert not result
+    assert link.last_sync_status == "failed"
+    assert "远端对象类型" in link.last_sync_error
+    assert db_session.query(SyncEvent).filter(SyncEvent.success.is_(False)).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_channel_links_counts_failures_and_continues(db_session):
+    channel = _add_channel_with_models(db_session)
+    first_target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    second_target = SyncTarget(name="sub2", target_type="sub2api", base_url="https://sub2.test", auth_config_json="{}")
+    db_session.add_all([first_target, second_target])
+    db_session.commit()
+    db_session.add_all(
+        [
+            ChannelSyncLink(channel_id=channel.id, target_id=first_target.id, remote_type="account", remote_id="42", remote_name="union_main"),
+            ChannelSyncLink(channel_id=channel.id, target_id=second_target.id, remote_type="account", remote_id="43", remote_name="union_second"),
+        ]
+    )
+    db_session.commit()
+
+    client = RoutingClient()
+    success_count, failure_count = await sync_channel_links(db_session, channel, action="manual_update", client=client)
+
+    assert (success_count, failure_count) == (1, 1)
+    assert client.updated == ["43"]
+    assert db_session.query(SyncEvent).filter(SyncEvent.success.is_(True)).count() == 1
+    assert db_session.query(SyncEvent).filter(SyncEvent.success.is_(False)).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_event_response_redacts_secret_strings_and_remains_json_loadable(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42", remote_name="union_main")
+    db_session.add(link)
+    db_session.commit()
+
+    result = await sync_existing_link(db_session, link, client=FakeSensitiveErrorClient(), action="manual_update")
+
+    assert not result
+    event = db_session.query(SyncEvent).filter(SyncEvent.success.is_(False)).one()
+    decoded = json.loads(event.response_json)
+    encoded = json.dumps(decoded, ensure_ascii=False)
+    assert "sk-live" not in encoded
+    assert "Bearer secret" not in encoded
+    assert "hunter2" not in encoded
+    assert "password" in encoded
+
+
+def test_record_sync_event_redacts_request_and_response_payloads(db_session):
+    record_sync_event(
+        db_session,
+        channel_id=None,
+        target_id=None,
+        action="manual_update",
+        success=False,
+        request_payload={"credentials": {"api_key": "sk-live"}},
+        response_payload='Authorization: Bearer secret\npassword: hunter2\n{"key":"sk-live"}',
+    )
+    db_session.commit()
+
+    event = db_session.query(SyncEvent).one()
+    json.loads(event.request_json)
+    response = json.dumps(json.loads(event.response_json), ensure_ascii=False)
+    assert "sk-live" not in event.request_json
+    assert "sk-live" not in response
+    assert "Bearer secret" not in response
+    assert "hunter2" not in response
+
+
+@pytest.mark.asyncio
+async def test_create_newapi_event_response_includes_create_and_lookup_sources(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    link = await create_channel_sync_link(db_session, channel, target, "", 50, 3, client=FakeNewAPIClient())
+
+    event = db_session.query(SyncEvent).filter(SyncEvent.success.is_(True)).one()
+    response = json.loads(event.response_json)
+    assert link.remote_id == "9"
+    assert response["create"]["success"] is True
+    assert response["lookup"]["id"] == 9
+    assert response["remote_id"] == "9"
