@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -503,9 +504,12 @@ def create_sync_target(
     try:
         db.add(target)
         db.commit()
-    except Exception as exc:
+    except IntegrityError:
         db.rollback()
-        return flash_redirect("/sync-targets", f"目标站点创建失败：{exc}", "error")
+        return flash_redirect("/sync-targets", "同步目标名称已存在。", "error")
+    except Exception:
+        db.rollback()
+        return flash_redirect("/sync-targets", "目标站点创建失败。", "error")
     return flash_redirect("/sync-targets", "目标站点已创建。")
 
 
@@ -558,11 +562,15 @@ def update_sync_target(
     target.enabled = bool(enabled)
     target.name_prefix = name_prefix.strip() or "union_"
     target.auth_config_json = json.dumps(config, ensure_ascii=False)
+    edit_path = f"/sync-targets/{target_id}/edit"
     try:
         db.commit()
-    except Exception as exc:
+    except IntegrityError:
         db.rollback()
-        return flash_redirect(f"/sync-targets/{target.id}/edit", f"目标站点保存失败：{exc}", "error")
+        return flash_redirect(edit_path, "同步目标名称已存在。", "error")
+    except Exception:
+        db.rollback()
+        return flash_redirect(edit_path, "目标站点保存失败。", "error")
     return flash_redirect("/sync-targets", "目标站点已保存。")
 
 
@@ -575,9 +583,9 @@ def delete_sync_target(target_id: int, db: Annotated[Session, Depends(get_db)], 
     try:
         db.delete(target)
         db.commit()
-    except Exception as exc:
+    except Exception:
         db.rollback()
-        return flash_redirect("/sync-targets", f"目标站点删除失败：{exc}", "error")
+        return flash_redirect("/sync-targets", "目标站点删除失败。", "error")
     return flash_redirect("/sync-targets", "目标站点已删除。")
 
 
@@ -587,7 +595,7 @@ async def test_sync_target(target_id: int, db: Annotated[Session, Depends(get_db
     try:
         await client_for_target(target).test_connection()
     except SyncClientError as exc:
-        return flash_redirect("/sync-targets", f"测试失败：{exc}", "error")
+        return flash_redirect("/sync-targets", sync_target_test_error_message(exc), "error")
     return flash_redirect("/sync-targets", "目标站点连接测试成功。")
 
 
@@ -1010,6 +1018,12 @@ def build_sync_target_rows(db: Session, targets: list[SyncTarget]) -> list[dict[
         }
         for target in targets
     ]
+
+
+def sync_target_test_error_message(exc: SyncClientError) -> str:
+    if exc.status_code is not None:
+        return f"连接测试失败：HTTP {exc.status_code}"
+    return "连接测试失败。"
 
 
 def _format_body_for_form(value: Any) -> str:
