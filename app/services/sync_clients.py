@@ -56,6 +56,12 @@ def _items_from_paginated(data: Any) -> list[dict[str, Any]]:
     return [item for item in raw_items if isinstance(item, dict)]
 
 
+def _has_more_pages(data: Any, page: int, page_size: int, item_count: int) -> bool:
+    if isinstance(data, dict) and isinstance(data.get("pages"), int):
+        return page < data["pages"]
+    return item_count >= page_size
+
+
 def _find_named_item(items: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     for item in items:
         if item.get("name") == name:
@@ -65,6 +71,7 @@ def _find_named_item(items: list[dict[str, Any]], name: str) -> dict[str, Any] |
 
 class BaseTargetClient:
     timeout = 20.0
+    max_pages = 100
 
     def __init__(self, target: SyncTarget, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.target = target
@@ -113,7 +120,7 @@ class Sub2APIClient(BaseTargetClient):
 
     def unwrap_response(self, response: httpx.Response) -> Any:
         data = super().unwrap_response(response)
-        if isinstance(data, dict) and data.get("code") != 0:
+        if isinstance(data, dict) and "code" in data and data.get("code") != 0:
             message = data.get("message") or "Sub2API 目标返回错误。"
             raise SyncClientError(str(message), status_code=response.status_code, response=data)
         if isinstance(data, dict) and "data" in data:
@@ -124,12 +131,20 @@ class Sub2APIClient(BaseTargetClient):
         return await self.request("GET", "/api/v1/admin/accounts", params={"page": 1, "page_size": 20})
 
     async def find_account_by_name(self, name: str) -> dict[str, Any] | None:
-        result = await self.request(
-            "GET",
-            "/api/v1/admin/accounts",
-            params={"page": 1, "page_size": 20, "search": name},
-        )
-        return _find_named_item(_items_from_paginated(result.data), name)
+        page_size = 20
+        for page in range(1, self.max_pages + 1):
+            result = await self.request(
+                "GET",
+                "/api/v1/admin/accounts",
+                params={"page": page, "page_size": page_size, "search": name},
+            )
+            items = _items_from_paginated(result.data)
+            found = _find_named_item(items, name)
+            if found is not None:
+                return found
+            if not _has_more_pages(result.data, page, page_size, len(items)):
+                return None
+        return None
 
     async def get_account(self, remote_id: str | int) -> dict[str, Any]:
         result = await self.request("GET", f"/api/v1/admin/accounts/{remote_id}")
@@ -167,12 +182,20 @@ class NewAPIClient(BaseTargetClient):
         return await self.request("GET", "/api/channel/", params={"p": 1, "page_size": 20})
 
     async def find_channel_by_name(self, name: str) -> dict[str, Any] | None:
-        result = await self.request(
-            "GET",
-            "/api/channel/search",
-            params={"keyword": name, "p": 1, "page_size": 20},
-        )
-        return _find_named_item(_items_from_paginated(result.data), name)
+        page_size = 20
+        for page in range(1, self.max_pages + 1):
+            result = await self.request(
+                "GET",
+                "/api/channel/search",
+                params={"keyword": name, "p": page, "page_size": page_size},
+            )
+            items = _items_from_paginated(result.data)
+            found = _find_named_item(items, name)
+            if found is not None:
+                return found
+            if not _has_more_pages(result.data, page, page_size, len(items)):
+                return None
+        return None
 
     async def get_channel(self, remote_id: str | int) -> dict[str, Any]:
         result = await self.request("GET", f"/api/channel/{remote_id}")
