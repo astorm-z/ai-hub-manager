@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>余额提取器</h1>
+      <p>使用安全 JSON 模板查询渠道余额，不执行 JavaScript。</p>
+    </div>
+  </div>
+
+  <section class="panel">
+    <h2>新增提取器</h2>
+    <form method="post" action="/extractors">
+      <div class="form-grid">
+        <div class="field">
+          <label for="name">名称</label>
+          <input id="name" name="name" required>
+        </div>
+        <div class="field">
+          <label for="description">描述</label>
+          <input id="description" name="description">
+        </div>
+        <div class="field full">
+          <label for="template_json">模板 JSON</label>
+          <textarea id="template_json" name="template_json" required>{% raw %}{
+  "request": {
+    "url": "{{baseUrl}}/v1/usage",
+    "method": "GET",
+    "headers": {
+      "Authorization": "Bearer {{apiKey}}"
+    }
+  },
+  "extract": {
+    "remaining": {"path": "remaining"},
+    "unit": {"const": "USD"}
+  }
+}{% endraw %}</textarea>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">创建提取器</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>提取器列表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>描述</th>
+          <th>类型</th>
+          <th>模板</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in extractors %}
+          <tr>
+            <td>{{ item.name }}</td>
+            <td>{{ item.description or "-" }}</td>
+            <td>
+              {% if item.builtin %}
+                <span class="badge success">内置</span>
+              {% else %}
+                <span class="badge">自定义</span>
+              {% endif %}
+            </td>
+            <td><div class="code">{{ item.template_json }}</div></td>
+            <td>
+              {% if not item.builtin %}
+                <form class="inline-form" method="post" action="/extractors/{{ item.id }}/delete" onsubmit="return confirm('确定删除这个提取器吗？');">
+                  <button class="danger" type="submit">删除</button>
+                </form>
+              {% else %}
+                <span class="muted">-</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

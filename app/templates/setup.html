@@ -1,0 +1,16 @@
+{% extends "auth_base.html" %}
+{% block content %}
+  <h1>初始化管理员</h1>
+  <p class="muted">首次启动需要创建一个本地管理员账号。</p>
+  <form method="post" action="/setup">
+    <div class="field">
+      <label for="username">用户名</label>
+      <input id="username" name="username" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required>
+    </div>
+    <button type="submit">创建管理员</button>
+  </form>
+{% endblock %}

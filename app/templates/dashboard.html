@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>仪表盘</h1>
+      <p>查看渠道可用性、模型数量、余额和未读告警。</p>
+    </div>
+    <div class="actions">
+      <a class="button" href="/channels/new">新增渠道</a>
+    </div>
+  </div>
+
+  <section class="stats">
+    <div class="stat">
+      <div class="label">渠道总数</div>
+      <div class="value">{{ stats.channels }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">启用渠道</div>
+      <div class="value">{{ stats.enabled }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">未读告警</div>
+      <div class="value">{{ stats.alerts }}</div>
+    </div>
+    <div class="stat">
+      <div class="label">通知渠道</div>
+      <div class="value">{{ stats.notifications }}</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <h2>状态管道</h2>
+        <p class="muted">最近 12 小时，每格 5 分钟；红色表示该时间段存在失败检测。</p>
+      </div>
+      <div class="status-legend">
+        <span><i class="legend-dot up"></i>正常</span>
+        <span><i class="legend-dot degraded"></i>部分异常</span>
+        <span><i class="legend-dot down"></i>异常</span>
+        <span><i class="legend-dot unknown"></i>无数据</span>
+        <span><i class="legend-dot disabled"></i>停用</span>
+      </div>
+    </div>
+    <div class="status-board">
+      {% for lane in status_lanes %}
+        <div class="status-lane">
+          <div class="status-lane-info">
+            <a href="/channels/{{ lane.channel.id }}">{{ lane.channel.name }}</a>
+            <div class="muted small">
+              {% if not lane.channel.enabled %}
+                停用
+              {% elif lane.latest and lane.latest.success %}
+                当前正常
+              {% elif lane.latest %}
+                当前异常
+              {% else %}
+                未检测
+              {% endif %}
+            </div>
+          </div>
+          <div class="status-track" aria-label="{{ lane.channel.name }} {{ lane.window_label }}状态">
+            {% for bucket in lane.buckets %}
+              <span class="status-segment {{ bucket.state }}" title="{{ bucket.start }}-{{ bucket.end }}：{{ bucket.label }}"></span>
+            {% endfor %}
+          </div>
+          <div class="status-metric">
+            {% if lane.uptime is not none %}
+              <strong>{{ "%.2f"|format(lane.uptime) }}%</strong>
+              <span class="muted small">{{ lane.failures }}/{{ lane.total }} 失败</span>
+            {% else %}
+              <strong>-</strong>
+              <span class="muted small">无检测</span>
+            {% endif %}
+          </div>
+        </div>
+      {% else %}
+        <div class="muted">还没有渠道。</div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>渠道状态</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>渠道</th>
+          <th>类型</th>
+          <th>状态</th>
+          <th>模型</th>
+          <th>余额</th>
+          <th>最近检测</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td><a href="/channels/{{ row.channel.id }}">{{ row.channel.name }}</a></td>
+            <td>{{ "Claude" if row.channel.provider_type == "claude" else "OpenAI兼容" }}</td>
+            <td>
+              {% if not row.channel.enabled %}
+                <span class="badge">停用</span>
+              {% elif row.status and row.status.success %}
+                <span class="badge success">正常</span>
+              {% elif row.status %}
+                <span class="badge error">异常</span>
+              {% else %}
+                <span class="badge warning">未检测</span>
+              {% endif %}
+            </td>
+            <td>{{ row.model_count }}</td>
+            <td>
+              {% if row.balance %}
+                {% if row.balance.is_valid %}
+                  {{ row.balance.remaining if row.balance.remaining is not none else "-" }} {{ row.balance.unit or "" }}
+                {% else %}
+                  <span class="badge error">查询失败</span>
+                {% endif %}
+              {% else %}
+                <span class="muted">无记录</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.status %}
+                {{ row.status.created_at|format_dt }}
+                <div class="muted small">{{ row.status.message }}</div>
+              {% else %}
+                <span class="muted">无记录</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="muted">还没有渠道。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>最近告警</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>级别</th>
+          <th>类型</th>
+          <th>内容</th>
+          <th>通知</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for event in events %}
+          <tr>
+            <td>{{ event.created_at|format_dt }}</td>
+            <td><span class="badge {{ 'error' if event.severity == 'critical' else 'warning' }}">{{ event.severity }}</span></td>
+            <td>{{ event.alert_type }}</td>
+            <td>{{ event.message }}</td>
+            <td>{{ event.notification_status }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">暂无告警。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

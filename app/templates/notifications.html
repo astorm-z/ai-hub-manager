@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>通知</h1>
+      <p>配置 SMTP 邮件或自定义 HTTP GET/POST 通知模板。</p>
+    </div>
+  </div>
+
+  <section class="panel">
+    <h2>模板变量</h2>
+    <div class="variable-grid">
+      <div>
+        <h3>通用变量</h3>
+        <div class="token-list">
+          <code>$alert_type</code>
+          <code>$channel_name</code>
+          <code>$severity</code>
+          <code>$message</code>
+          <code>$created_at</code>
+        </div>
+      </div>
+      <div>
+        <h3>错误阈值告警</h3>
+        <div class="token-list">
+          <code>$error_count</code>
+          <code>$window_minutes</code>
+        </div>
+      </div>
+      <div>
+        <h3>模型变动告警</h3>
+        <div class="token-list">
+          <code>$added_models</code>
+          <code>$removed_models</code>
+          <code>$old_models</code>
+          <code>$new_models</code>
+        </div>
+      </div>
+      <div>
+        <h3>余额阈值告警</h3>
+        <div class="token-list">
+          <code>$remaining</code>
+          <code>$unit</code>
+          <code>$threshold</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>{{ "编辑通知渠道" if mode == "edit" else "新增通知渠道" }}</h2>
+    {% if mode == "edit" %}
+      <p class="muted">正在编辑：{{ editing.name }}。SMTP 密码留空会保留原密码。</p>
+    {% endif %}
+    <form method="post" action="{{ '/notifications/' ~ editing.id if mode == 'edit' else '/notifications' }}" class="notification-form">
+      <div class="form-grid">
+        <div class="field">
+          <label for="name">名称</label>
+          <input id="name" name="name" value="{{ form.name }}" required>
+        </div>
+        <div class="field">
+          <label for="channel_type">类型</label>
+          <select id="channel_type" name="channel_type" class="notification-type">
+            <option value="email" {% if form.channel_type == "email" %}selected{% endif %}>SMTP 邮件</option>
+            <option value="http" {% if form.channel_type == "http" %}selected{% endif %}>HTTP GET/POST</option>
+          </select>
+        </div>
+
+        <div class="field full notice-fields notice-email">
+          <h3>SMTP 邮件配置</h3>
+        </div>
+        <div class="field notice-fields notice-email">
+          <label for="email_host">SMTP 服务器</label>
+          <input id="email_host" name="email_host" value="{{ form.email_host }}" placeholder="smtp.example.com">
+        </div>
+        <div class="field notice-fields notice-email">
+          <label for="email_port">端口</label>
+          <input id="email_port" name="email_port" type="number" min="1" value="{{ form.email_port }}">
+        </div>
+        <div class="field notice-fields notice-email">
+          <label for="email_username">用户名</label>
+          <input id="email_username" name="email_username" value="{{ form.email_username }}" autocomplete="username">
+        </div>
+        <div class="field notice-fields notice-email">
+          <label for="email_password">密码</label>
+          <input id="email_password" name="email_password" type="password" autocomplete="new-password" placeholder="{{ '留空保留原密码' if mode == 'edit' else '' }}">
+        </div>
+        <div class="field notice-fields notice-email">
+          <label for="email_sender">发件人</label>
+          <input id="email_sender" name="email_sender" value="{{ form.email_sender }}" placeholder="默认使用用户名">
+        </div>
+        <div class="field notice-fields notice-email">
+          <label for="email_recipients">收件人</label>
+          <input id="email_recipients" name="email_recipients" value="{{ form.email_recipients }}" placeholder="a@example.com,b@example.com">
+        </div>
+        <div class="field full notice-fields notice-email">
+          <label for="email_subject">主题模板</label>
+          <input id="email_subject" name="email_subject" value="{{ form.email_subject }}">
+        </div>
+        <div class="field full notice-fields notice-email">
+          <label for="email_body">正文模板</label>
+          <textarea id="email_body" name="email_body">{{ form.email_body }}</textarea>
+        </div>
+        <div class="field full notice-fields notice-email">
+          <label class="check-row">
+            <input type="checkbox" name="email_use_tls" value="true" {% if form.email_use_tls %}checked{% endif %}>
+            使用 STARTTLS
+          </label>
+        </div>
+
+        <div class="field full notice-fields notice-http">
+          <h3>HTTP 请求配置</h3>
+        </div>
+        <div class="field notice-fields notice-http">
+          <label for="http_method">请求方法</label>
+          <select id="http_method" name="http_method">
+            <option value="POST" {% if form.http_method == "POST" %}selected{% endif %}>POST</option>
+            <option value="GET" {% if form.http_method == "GET" %}selected{% endif %}>GET</option>
+          </select>
+        </div>
+        <div class="field notice-fields notice-http">
+          <label for="http_url">URL</label>
+          <input id="http_url" name="http_url" value="{{ form.http_url }}" placeholder="https://example.com/webhook">
+        </div>
+        <div class="field full notice-fields notice-http">
+          <div class="field-heading">
+            <label for="http_headers_json">Headers JSON</label>
+            <span class="mini-actions">
+              <button class="secondary small-button json-format" type="button" data-target="http_headers_json">格式化</button>
+              <button class="secondary small-button json-compact" type="button" data-target="http_headers_json">压缩</button>
+            </span>
+          </div>
+          <textarea id="http_headers_json" name="http_headers_json">{{ form.http_headers_json }}</textarea>
+        </div>
+        <div class="field full notice-fields notice-http">
+          <div class="field-heading">
+            <label for="http_body">Body 模板</label>
+            <span class="mini-actions">
+              <button class="secondary small-button json-format" type="button" data-target="http_body">格式化</button>
+              <button class="secondary small-button json-compact" type="button" data-target="http_body">压缩</button>
+            </span>
+          </div>
+          <textarea id="http_body" name="http_body">{{ form.http_body }}</textarea>
+        </div>
+        <div class="field full">
+          <label class="check-row">
+            <input type="checkbox" name="enabled" value="true" {% if form.enabled %}checked{% endif %}>
+            启用通知渠道
+          </label>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit">{{ "保存通知渠道" if mode == "edit" else "创建通知渠道" }}</button>
+        {% if mode == "edit" %}
+          <a class="button secondary" href="/notifications">取消编辑</a>
+        {% endif %}
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>通知渠道列表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>类型</th>
+          <th>状态</th>
+          <th>配置</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in channels %}
+          <tr>
+            <td>{{ item.name }}</td>
+            <td>{{ "SMTP 邮件" if item.channel_type == "email" else "HTTP GET/POST" }}</td>
+            <td>
+              {% if item.enabled %}
+                <span class="badge success">启用</span>
+              {% else %}
+                <span class="badge">停用</span>
+              {% endif %}
+            </td>
+            <td><div class="code">{{ item.config_json }}</div></td>
+            <td>
+              <a class="button secondary" href="/notifications/{{ item.id }}/edit">编辑</a>
+              <form class="inline-form" method="post" action="/notifications/{{ item.id }}/test">
+                <button class="secondary" type="submit">测试</button>
+              </form>
+              <form class="inline-form" method="post" action="/notifications/{{ item.id }}/delete" onsubmit="return confirm('确定删除这个通知渠道吗？');">
+                <button class="danger" type="submit">删除</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">暂无通知渠道。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <script>
+    const form = document.querySelector(".notification-form");
+    const channelType = form.querySelector(".notification-type");
+    const updateNotificationFields = () => {
+      const selected = channelType.value;
+      form.querySelectorAll(".notice-fields").forEach((node) => {
+        const visible = node.classList.contains(`notice-${selected}`);
+        node.style.display = visible ? "" : "none";
+        node.querySelectorAll("input, select, textarea, button").forEach((field) => {
+          field.disabled = !visible;
+        });
+      });
+    };
+    const transformJson = (targetId, compact) => {
+      const target = document.getElementById(targetId);
+      try {
+        const parsed = JSON.parse(target.value);
+        target.value = compact ? JSON.stringify(parsed) : JSON.stringify(parsed, null, 2);
+      } catch (error) {
+        alert("不是合法 JSON，无法处理。");
+      }
+    };
+    form.querySelectorAll(".json-format").forEach((button) => {
+      button.addEventListener("click", () => transformJson(button.dataset.target, false));
+    });
+    form.querySelectorAll(".json-compact").forEach((button) => {
+      button.addEventListener("click", () => transformJson(button.dataset.target, true));
+    });
+    channelType.addEventListener("change", updateNotificationFields);
+    updateNotificationFields();
+  </script>
+{% endblock %}

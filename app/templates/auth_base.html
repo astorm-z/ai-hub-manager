@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_name }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="auth-page">
+      <section class="auth-box">
+        {% if flash %}
+          <div class="flash {{ flash.level }}">{{ flash.message }}</div>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </section>
+    </main>
+  </body>
+</html>

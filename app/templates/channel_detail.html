@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>{{ channel.name }}</h1>
+      <p>{{ channel.base_url }}</p>
+    </div>
+    <div class="actions">
+      <form class="inline-form" method="post" action="/channels/{{ channel.id }}/refresh-models">
+        <button type="submit">刷新模型</button>
+      </form>
+      <form class="inline-form" method="post" action="/channels/{{ channel.id }}/refresh-balance">
+        <button class="secondary" type="submit">查询余额</button>
+      </form>
+      <form class="inline-form" method="post" action="/channels/{{ channel.id }}/delete" onsubmit="return confirm('确定删除这个渠道吗？');">
+        <button class="danger" type="submit">删除</button>
+      </form>
+    </div>
+  </div>
+
+  <section class="panel">
+    <h2>渠道配置</h2>
+    <form method="post" action="/channels/{{ channel.id }}">
+      {% include "partials/channel_fields.html" %}
+      <div class="actions">
+        <button type="submit">保存渠道</button>
+      </div>
+    </form>
+  </section>
+
+  <div class="grid two">
+    <section class="panel">
+      <h2>模型测试</h2>
+      <form method="post" action="/channels/{{ channel.id }}/test-model" class="grid">
+        <div class="field">
+          <label for="model">模型</label>
+          <select id="model" name="model" required>
+            {% if channel.probe_model %}
+              <option value="{{ channel.probe_model }}">{{ channel.probe_model }}（探测模型）</option>
+            {% endif %}
+            {% for model in models %}
+              <option value="{{ model.model_id }}">{{ model.model_id }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="prompt">测试提示词</label>
+          <input id="prompt" name="prompt" value="Reply with OK.">
+        </div>
+        <div>
+          <button type="submit">发送测试请求</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>告警策略</h2>
+      <form method="post" action="/channels/{{ channel.id }}/alert-rule" class="grid">
+        <div class="form-grid">
+          <div class="field">
+            <label for="error_window_minutes">错误窗口分钟</label>
+            <input id="error_window_minutes" name="error_window_minutes" type="number" min="1" value="{{ rule.error_window_minutes }}">
+          </div>
+          <div class="field">
+            <label for="error_threshold">错误次数阈值</label>
+            <input id="error_threshold" name="error_threshold" type="number" min="1" value="{{ rule.error_threshold }}">
+          </div>
+          <div class="field">
+            <label for="balance_threshold">余额阈值</label>
+            <input id="balance_threshold" name="balance_threshold" type="number" step="0.0001" value="{{ rule.balance_threshold if rule.balance_threshold is not none else '' }}">
+          </div>
+          <div class="field">
+            <label for="cooldown_minutes">冷却分钟</label>
+            <input id="cooldown_minutes" name="cooldown_minutes" type="number" min="1" value="{{ rule.cooldown_minutes }}">
+          </div>
+        </div>
+        <label class="check-row">
+          <input type="checkbox" name="model_change_enabled" value="true" {% if rule.model_change_enabled %}checked{% endif %}>
+          模型变动告警
+        </label>
+        <label class="check-row">
+          <input type="checkbox" name="balance_threshold_enabled" value="true" {% if rule.balance_threshold_enabled %}checked{% endif %}>
+          余额阈值告警
+        </label>
+        <div>
+          <button type="submit">保存告警策略</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>模型列表</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>模型</th>
+          <th>归属</th>
+          <th>首次发现</th>
+          <th>本次刷新时间</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for model in models %}
+          <tr>
+            <td>{{ model.model_id }}</td>
+            <td>{{ model.owned_by or "-" }}</td>
+            <td>{{ model.first_seen_at|format_dt }}</td>
+            <td>{{ model.last_seen_at|format_dt }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="muted">还没有模型记录。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <div class="grid two">
+    <section class="panel">
+      <h2>最近检测</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>类型</th>
+            <th>结果</th>
+            <th>信息</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in checks %}
+            {% set item = row.check %}
+            <tr>
+              <td>{{ item.created_at|format_dt }}</td>
+              <td>{{ item.check_type }}</td>
+              <td>
+                {% if item.success %}
+                  <span class="badge success">成功</span>
+                {% else %}
+                  <span class="badge error">失败</span>
+                {% endif %}
+              </td>
+              <td>
+                {{ item.message }}
+                {% if row.balance %}
+                  <div class="muted small">
+                    {% if row.balance.is_valid %}
+                      余额：{{ row.balance.remaining if row.balance.remaining is not none else "-" }} {{ row.balance.unit or "" }}
+                      {% if row.balance.used is not none %} · 已用：{{ row.balance.used }} {{ row.balance.unit or "" }}{% endif %}
+                      {% if row.balance.total is not none %} · 总额：{{ row.balance.total }} {{ row.balance.unit or "" }}{% endif %}
+                      {% if row.balance.plan_name %} · 套餐：{{ row.balance.plan_name }}{% endif %}
+                    {% else %}
+                      余额查询失败：{{ row.balance.invalid_message or "未知错误" }}
+                    {% endif %}
+                  </div>
+                {% endif %}
+                {% if item.latency_ms is not none %}
+                  <div class="muted small">{{ item.latency_ms }} ms{% if item.status_code %} · HTTP {{ item.status_code }}{% endif %}</div>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">暂无检测记录。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>余额记录</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>结果</th>
+            <th>余额</th>
+            <th>套餐</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in balances %}
+            <tr>
+              <td>{{ item.created_at|format_dt }}</td>
+              <td>
+                {% if item.is_valid %}
+                  <span class="badge success">有效</span>
+                {% else %}
+                  <span class="badge error">无效</span>
+                {% endif %}
+              </td>
+              <td>{{ item.remaining if item.remaining is not none else "-" }} {{ item.unit or "" }}</td>
+              <td>{{ item.plan_name or item.invalid_message or "-" }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">暂无余额记录。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </div>
+{% endblock %}

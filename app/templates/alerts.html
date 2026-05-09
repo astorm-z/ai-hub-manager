@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>告警</h1>
+      <p>查看错误阈值、模型变动和余额阈值触发记录。当前未读 {{ unread_count }} 条。</p>
+    </div>
+    <div class="actions">
+      <form method="post" action="/alerts/ack-all">
+        <button class="secondary" type="submit" {% if unread_count == 0 %}disabled{% endif %}>一键已读</button>
+      </form>
+    </div>
+  </div>
+
+  <section class="panel">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>渠道</th>
+          <th>级别</th>
+          <th>类型</th>
+          <th>内容</th>
+          <th>通知</th>
+          <th>状态</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for event in events %}
+          <tr>
+            <td>{{ event.created_at|format_dt }}</td>
+            <td>{{ channel_names.get(event.channel_id, "-") }}</td>
+            <td><span class="badge {{ 'error' if event.severity == 'critical' else 'warning' }}">{{ event.severity }}</span></td>
+            <td>{{ event.alert_type }}</td>
+            <td>
+              {{ event.message }}
+              {% if event.notification_error %}
+                <div class="muted small">{{ event.notification_error }}</div>
+              {% endif %}
+            </td>
+            <td>{{ event.notification_status }}</td>
+            <td>
+              {% if event.acknowledged %}
+                <span class="badge success">已读</span>
+              {% else %}
+                <span class="badge warning">未读</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if not event.acknowledged %}
+                <form class="inline-form" method="post" action="/alerts/{{ event.id }}/ack">
+                  <button class="secondary" type="submit">标记已读</button>
+                </form>
+              {% else %}
+                <span class="muted">-</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="muted">暂无告警。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

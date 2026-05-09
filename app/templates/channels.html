@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>渠道</h1>
+      <p>维护 OpenAI 兼容和 Claude 兼容中转渠道。</p>
+    </div>
+    <div class="actions">
+      <a class="button" href="/channels/new">新增渠道</a>
+    </div>
+  </div>
+
+  <section class="panel">
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>类型</th>
+          <th>Base URL</th>
+          <th>状态</th>
+          <th>模型</th>
+          <th>余额</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td><a href="/channels/{{ row.channel.id }}">{{ row.channel.name }}</a></td>
+            <td>{{ "Claude" if row.channel.provider_type == "claude" else "OpenAI兼容" }}</td>
+            <td class="small">{{ row.channel.base_url }}</td>
+            <td>
+              {% if row.channel.enabled %}
+                <span class="badge success">启用</span>
+              {% else %}
+                <span class="badge">停用</span>
+              {% endif %}
+            </td>
+            <td>{{ row.model_count }}</td>
+            <td>
+              {% if row.balance and row.balance.is_valid %}
+                {{ row.balance.remaining if row.balance.remaining is not none else "-" }} {{ row.balance.unit or "" }}
+              {% else %}
+                <span class="muted">-</span>
+              {% endif %}
+            </td>
+            <td><a class="button secondary" href="/channels/{{ row.channel.id }}">管理</a></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="muted">还没有渠道。</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

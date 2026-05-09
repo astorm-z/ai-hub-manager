@@ -1,0 +1,83 @@
+<div class="form-grid">
+  <div class="field">
+    <label for="name">名称</label>
+    <input id="name" name="name" value="{{ channel.name if channel else '' }}" required>
+  </div>
+  <div class="field">
+    <label for="provider_type">渠道类型</label>
+    <select id="provider_type" name="provider_type">
+      <option value="openai" {% if channel and channel.provider_type == "openai" %}selected{% endif %}>OpenAI 兼容</option>
+      <option value="claude" {% if channel and channel.provider_type == "claude" %}selected{% endif %}>Claude / Anthropic 兼容</option>
+    </select>
+  </div>
+  <div class="field full">
+    <label for="base_url">Base URL</label>
+    <input id="base_url" name="base_url" placeholder="https://example.com" value="{{ channel.base_url if channel else '' }}" required>
+  </div>
+  <div class="field full">
+    <label for="api_key">API Key</label>
+    <input id="api_key" name="api_key" value="{{ channel.api_key if channel else '' }}" required>
+  </div>
+  <div class="field">
+    <label for="timeout_seconds">请求超时秒数</label>
+    <input id="timeout_seconds" name="timeout_seconds" type="number" min="1" step="1" value="{{ channel.timeout_seconds if channel else 20 }}">
+  </div>
+  <div class="field">
+    <label for="probe_model">探测模型</label>
+    <input id="probe_model" name="probe_model" value="{{ channel.probe_model if channel and channel.probe_model else '' }}" placeholder="可选">
+  </div>
+  <div class="field">
+    <label for="model_check_interval_minutes">模型检测间隔分钟</label>
+    <input id="model_check_interval_minutes" name="model_check_interval_minutes" type="number" min="1" value="{{ channel.model_check_interval_minutes if channel else 10 }}">
+  </div>
+  <div class="field">
+    <label for="balance_check_interval_minutes">余额检测间隔分钟</label>
+    <input id="balance_check_interval_minutes" name="balance_check_interval_minutes" type="number" min="1" value="{{ channel.balance_check_interval_minutes if channel else 30 }}">
+  </div>
+  <div class="field provider-openai-only">
+    <label for="openai_test_mode">OpenAI 测试接口</label>
+    <select id="openai_test_mode" name="openai_test_mode">
+      <option value="chat_completions" {% if not channel or channel.openai_test_mode == "chat_completions" %}selected{% endif %}>/v1/chat/completions</option>
+      <option value="responses" {% if channel and channel.openai_test_mode == "responses" %}selected{% endif %}>/v1/responses</option>
+    </select>
+    <div class="muted small">仅 OpenAI 兼容渠道使用；Claude 渠道固定使用 /v1/messages。</div>
+  </div>
+  <div class="field">
+    <label for="extractor_template_id">余额提取器</label>
+    <select id="extractor_template_id" name="extractor_template_id">
+      <option value="">不查询余额</option>
+      {% for item in extractors %}
+        <option value="{{ item.id }}" {% if channel and channel.extractor_template_id == item.id %}selected{% endif %}>{{ item.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="field full">
+    <label for="extractor_vars_json">提取器变量 JSON</label>
+    <textarea id="extractor_vars_json" name="extractor_vars_json">{{ channel.extractor_vars_json if channel else '{}' }}</textarea>
+    <div class="muted small">内置变量已有 baseUrl、apiKey。newapi 通常还需要 accessToken 和 userId。</div>
+  </div>
+  <div class="field full">
+    <label class="check-row">
+      <input type="checkbox" name="enabled" value="true" {% if not channel or channel.enabled %}checked{% endif %}>
+      启用渠道
+    </label>
+  </div>
+</div>
+
+<script>
+  (() => {
+    const provider = document.querySelector("#provider_type");
+    const openaiOnly = document.querySelectorAll(".provider-openai-only");
+    const updateProviderFields = () => {
+      const isOpenAI = provider.value === "openai";
+      openaiOnly.forEach((node) => {
+        node.style.display = isOpenAI ? "" : "none";
+        node.querySelectorAll("input, select, textarea").forEach((field) => {
+          field.disabled = !isOpenAI;
+        });
+      });
+    };
+    provider.addEventListener("change", updateProviderFields);
+    updateProviderFields();
+  })();
+</script>

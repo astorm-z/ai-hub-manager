@@ -1,0 +1,16 @@
+{% extends "auth_base.html" %}
+{% block content %}
+  <h1>登录</h1>
+  <p class="muted">进入 AI 中转渠道管理后台。</p>
+  <form method="post" action="/login">
+    <div class="field">
+      <label for="username">用户名</label>
+      <input id="username" name="username" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit">登录</button>
+  </form>
+{% endblock %}
