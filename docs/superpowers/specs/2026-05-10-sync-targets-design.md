@@ -25,7 +25,7 @@
 - 首版不在本站删除远端 `sub2api Account` 或 `new-api Channel`。
 - 首版不自动复用同名远端对象。
 - 首版不支持远端对象人工选择绑定。远端对象 ID 由首次导入创建成功后写入。
-- 首版不同步 `new-api` 的所有高级字段，例如渠道分组、权重、自动禁用策略、参数覆盖和 Header 覆盖。
+- 首版不同步 `new-api` 的所有高级字段，例如权重、自动禁用策略、参数覆盖和 Header 覆盖。
 
 ## 需求结论
 
@@ -35,6 +35,8 @@
 - `sub2api` 侧导入目标为 `Account`。
 - `sub2api` 关联需要额外维护并同步 `group_ids`、`priority`、`concurrency`。
 - `sub2api` 专属参数放在“渠道与目标站点的关联配置”上，而不是放在本站渠道或目标站点默认配置上。
+- `sub2api` 关联分组不再只手动输入 ID，应从目标站点获取分组列表并支持多选。
+- `new-api` 关联也需要支持分组多选，提交给远端的格式为逗号分隔字符串，例如 `claude-code,claude-code-ot`。
 - 模型列表同步使用本站当前已发现模型快照，即 `ChannelModel` 表中的模型。
 - 首次导入时，远端名称为 `目标站点名称前缀 + 本站渠道名`。
 - 目标站点名称前缀默认 `union_`，可以在目标站点管理中按站点修改。
@@ -110,6 +112,7 @@
 - `sub2api_group_ids_json`: `sub2api` 账号分组 ID JSON 数组，例如 `[1, 2]`。
 - `sub2api_priority`: `sub2api` 账号优先级。
 - `sub2api_concurrency`: `sub2api` 账号并发数。
+- `newapi_groups`: `new-api` 渠道分组逗号分隔字符串，例如 `default` 或 `claude-code,claude-code-ot`。
 - `last_sync_status`: `never`、`success` 或 `failed`。
 - `last_sync_error`: 最近一次同步错误。
 - `last_synced_at`: 最近一次成功同步时间。
@@ -166,7 +169,7 @@
 - `models`: 本站当前模型快照按逗号拼接，例如 `gpt-4,gpt-4o`
 - `test_model`: `channel.probe_model`
 - `status`: `channel.enabled` 为真时 `1`，否则 `2`
-- `group`: 首版固定 `default`
+- `group`: 来自关联配置 `newapi_groups`，空值回退为 `default`
 
 首次创建请求：
 
@@ -181,7 +184,7 @@
     "models": "gpt-4,gpt-4o",
     "test_model": "gpt-4o",
     "status": 1,
-    "group": "default"
+    "group": "claude-code,claude-code-ot"
   }
 }
 ```
@@ -256,6 +259,16 @@ New-Api-User: <new_api_user>
 
 如果 `authorization` 没有 `Bearer ` 前缀，服务层可以原样发送，不强行补前缀，避免兼容问题。UI 文案提示用户按目标站点要求填写完整值。
 
+分组列表接口：
+
+- `sub2api`: 调用 `GET /api/v1/admin/groups/all`。可按渠道平台传入 `platform=openai` 或 `platform=anthropic` 过滤。响应数据归一化为包含 `id`、`name`、`platform`、`status` 的结构。
+- `new-api`: 调用 `GET /api/group/`。响应数据是字符串数组，归一化为包含 `name` 和 `value` 的结构。
+
+分组列表拉取失败时，不阻断渠道详情页渲染。页面应显示该目标站点分组获取失败的提示，并保留手动填写兜底：
+
+- `sub2api`: 手动填写逗号分隔分组 ID，例如 `1,2,3`。
+- `new-api`: 手动填写逗号分隔分组名，例如 `claude-code,claude-code-ot`。
+
 ## 同步流程
 
 ### 目标站点管理
@@ -299,11 +312,12 @@ New-Api-User: <new_api_user>
 - 暂停/恢复自动同步。
 - 删除本地关联。
 
-`sub2api` 关联表单额外字段：
+关联表单按目标站点类型展示分组配置：
 
-- `group_ids`: 逗号分隔输入，例如 `1,2,3`。
-- `priority`: 整数。
-- `concurrency`: 整数。
+- `sub2api`: 从目标站点分组列表渲染多选框，提交值保存到 `sub2api_group_ids_json`。分组列表失败时显示逗号分隔 ID 的手动输入框。
+- `sub2api`: 继续展示 `priority` 整数输入。
+- `sub2api`: 继续展示 `concurrency` 整数输入。
+- `new-api`: 从目标站点分组列表渲染多选框，提交值按逗号拼接后保存到 `newapi_groups`。未选择时保存或同步为 `default`。分组列表失败时显示逗号分隔分组名的手动输入框。
 
 ### 首次导入
 
@@ -408,6 +422,15 @@ POST /channels/{channel_id}/sync-links/{link_id}/delete
 
 - 在 `base.html` 增加“同步目标”入口。
 
+## 数据库兼容
+
+新增表可以直接由 SQLAlchemy `create_all()` 创建。已有库升级时如果 `channel_sync_links` 已存在，应在应用启动初始化中检测表结构并补齐新增列：
+
+- 使用 SQLite `PRAGMA table_info(channel_sync_links)` 检查列。
+- 缺少 `newapi_groups` 时执行 `ALTER TABLE channel_sync_links ADD COLUMN newapi_groups TEXT DEFAULT 'default'`。
+- 迁移逻辑必须幂等，重复启动不能报错。
+- 迁移不修改已有关联的远端对象，只补本地字段。
+
 ## 错误处理
 
 错误类型：
@@ -421,6 +444,7 @@ POST /channels/{channel_id}/sync-links/{link_id}/delete
 - 首次导入同名冲突。
 - 远端对象 ID 不存在。
 - `sub2api group_ids` 输入不是逗号分隔整数。
+- `new-api` 分组手动输入为空时回退为 `default`。
 
 错误展示：
 
@@ -439,6 +463,13 @@ POST /channels/{channel_id}/sync-links/{link_id}/delete
   - `1,2,3` -> `[1,2,3]`
   - 空字符串 -> `[]`
   - `1,a` -> 报错
+- `new-api` 分组解析：
+  - `claude-code,claude-code-ot` -> `claude-code,claude-code-ot`
+  - 空字符串 -> `default`
+  - 多余空格和空片段会被清理
+- 分组列表客户端：
+  - `sub2api` 使用 `/api/v1/admin/groups/all`
+  - `new-api` 使用 `/api/group/`
 - 敏感字段脱敏。
 - 目标站点鉴权头：
   - `sub2api` 使用 `x-api-key`
@@ -457,12 +488,14 @@ POST /channels/{channel_id}/sync-links/{link_id}/delete
 - 编辑目标站点名称前缀。
 - 删除有关联的目标站点被拦截。
 - 渠道详情页能渲染同步关联。
+- 渠道详情页能为 `sub2api` 和 `new-api` 渲染远端分组多选项。
+- 分组列表获取失败时，渠道详情页能渲染手动输入兜底。
 
 ## 后续扩展
 
 - 增加异步同步队列和自动重试。
 - 支持选择已有远端对象进行绑定。
 - 支持远端删除选项。
-- 支持 `new-api` 的 `group`、`priority`、`weight` 等站点级或关联级配置。
+- 支持 `new-api` 的 `priority`、`weight` 等站点级或关联级配置。
 - 增加同步日志 UI。
 - 支持批量选择多个本站渠道一次导入多个目标站点。
