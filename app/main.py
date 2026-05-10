@@ -19,7 +19,7 @@ from sqlalchemy.orm.attributes import NO_VALUE, set_committed_value
 
 from app.config import settings
 from app.database import get_db, init_db
-from app.models import AlertEvent, AlertRule, BalanceSnapshot, Channel, ChannelModel, ChannelSyncLink, ExtractorTemplate, HealthCheck, NotificationChannel, SyncTarget, User, now_utc
+from app.models import AlertEvent, AlertRule, BalanceSnapshot, Channel, ChannelModel, ChannelSyncLink, ExtractorTemplate, HealthCheck, NotificationChannel, SyncEvent, SyncTarget, User, now_utc
 from app.services.auth import authenticate, create_admin, has_admin, make_session_token, read_session_token
 from app.services.extractors import query_channel_balance, seed_builtin_extractors
 from app.services.monitoring import ensure_default_alert_rule, latest_balance, probe_channel_model, recent_status, refresh_channel_balance, refresh_channel_models
@@ -348,6 +348,8 @@ async def update_channel(
 @app.post("/channels/{channel_id}/delete")
 def delete_channel(channel_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
     channel = _get_channel(db, channel_id)
+    db.query(SyncEvent).filter(SyncEvent.channel_id == channel.id).update({"channel_id": None}, synchronize_session=False)
+    db.query(AlertEvent).filter(AlertEvent.channel_id == channel.id).update({"channel_id": None}, synchronize_session=False)
     db.delete(channel)
     db.commit()
     return flash_redirect("/channels", "渠道已删除。")

@@ -8,7 +8,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.database import get_db
 from app.main import app, build_sync_target_config, channel_sync_context, create_channel, default_probe_model_for_provider, normalize_new_channel_probe_model, normalize_sync_target_base_url, sync_target_form_from_item
-from app.models import AlertRule, Channel, ChannelSyncLink, SyncTarget, User
+from app.models import AlertEvent, AlertRule, Channel, ChannelSyncLink, SyncEvent, SyncTarget, User
 from app.schemas import ProbeResult
 from app.services.auth import make_session_token
 from app.services.sync_clients import SyncClientError
@@ -663,6 +663,33 @@ def test_create_channel_persists_default_probe_model(db_session):
     channel = db_session.query(Channel).filter(Channel.name == "main").one()
     assert response.status_code == 303
     assert channel.probe_model == "claude-haiku-4-5"
+
+
+def test_delete_channel_nulls_history_references_before_delete(db_session):
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    db_session.add_all([user, channel])
+    db_session.flush()
+    db_session.add(SyncEvent(channel_id=channel.id, action="remote_import", success=True))
+    db_session.add(AlertEvent(channel_id=channel.id, alert_type="model_change", message="changed"))
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/delete",
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    sync_event = db_session.query(SyncEvent).one()
+    alert_event = db_session.query(AlertEvent).one()
+    assert response.status_code == 303
+    assert db_session.get(Channel, channel.id) is None
+    assert sync_event.channel_id is None
+    assert alert_event.channel_id is None
 
 
 def test_new_channel_page_renders_probe_model_defaults(db_session):
