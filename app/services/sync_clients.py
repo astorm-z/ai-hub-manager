@@ -219,6 +219,9 @@ class Sub2APIClient(BaseTargetClient):
     async def update_account(self, remote_id: str | int, payload: dict[str, Any]) -> SyncClientResult:
         return await self.request("PUT", f"/api/v1/admin/accounts/{remote_id}", json=payload)
 
+    async def delete_account(self, remote_id: str | int) -> SyncClientResult:
+        return await self.request("DELETE", f"/api/v1/admin/accounts/{remote_id}")
+
 
 class NewAPIClient(BaseTargetClient):
     def headers(self) -> dict[str, str]:
@@ -284,6 +287,9 @@ class NewAPIClient(BaseTargetClient):
 
     async def update_channel(self, payload: dict[str, Any]) -> SyncClientResult:
         return await self.request("PUT", "/api/channel/", json=payload)
+
+    async def delete_channel(self, remote_id: str | int) -> SyncClientResult:
+        return await self.request("DELETE", f"/api/channel/{remote_id}")
 
 
 def client_for_target(

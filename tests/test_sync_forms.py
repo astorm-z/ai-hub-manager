@@ -382,6 +382,69 @@ def test_channel_sync_link_delete_removes_only_local_link(db_session):
     assert db_session.get(SyncTarget, target.id) is not None
 
 
+def test_channel_detail_renders_remote_delete_option_for_sync_link(db_session):
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.flush()
+    db_session.add(AlertRule(channel_id=channel.id))
+    db_session.add(ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42"))
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/channels/{channel.id}",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert "删除关联" in response.text
+    assert "删除远端" in response.text
+    assert 'type="hidden" name="delete_remote" value="true"' in response.text
+
+
+def test_channel_sync_link_delete_with_remote_passes_option_to_service(db_session, monkeypatch):
+    captured = {}
+
+    async def fake_delete_channel_sync_link_service(db, link, *, delete_remote):
+        captured["link_id"] = link.id
+        captured["delete_remote"] = delete_remote
+        db.delete(link)
+        db.commit()
+        return True, "同步关联已删除；远端对象已删除。"
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.flush()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42")
+    db_session.add(link)
+    db_session.commit()
+    monkeypatch.setattr("app.main.delete_channel_sync_link_service", fake_delete_channel_sync_link_service)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links/{link.id}/delete",
+            data={"delete_remote": "true"},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert response.status_code == 303
+    assert captured == {"link_id": link.id, "delete_remote": True}
+    assert flash["message"] == "同步关联已删除；远端对象已删除。"
+    assert db_session.get(ChannelSyncLink, link.id) is None
+
+
 def test_update_channel_runs_auto_sync_after_save(db_session, monkeypatch):
     calls = []
 

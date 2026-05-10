@@ -321,6 +321,7 @@ async def sync_existing_link(
         _validate_link_target_type(link)
         target_client = client or client_for_target(link.target)
         models = channel_model_ids(db, link.channel_id)
+        remote_name = build_remote_name(link.target, link.channel)
 
         if link.remote_type == "account":
             existing = await target_client.get_account(link.remote_id)
@@ -328,7 +329,7 @@ async def sync_existing_link(
                 link.channel,
                 models,
                 link,
-                remote_name=link.remote_name or build_remote_name(link.target, link.channel),
+                remote_name=remote_name,
                 existing_payload=existing,
             )
             result = await target_client.update_account(link.remote_id, request_payload)
@@ -337,7 +338,7 @@ async def sync_existing_link(
             request_payload = build_newapi_channel_payload(
                 link.channel,
                 models,
-                remote_name=link.remote_name or build_remote_name(link.target, link.channel),
+                remote_name=remote_name,
                 remote_id=link.remote_id,
                 newapi_groups=link.newapi_groups,
                 existing_payload=existing,
@@ -348,6 +349,7 @@ async def sync_existing_link(
 
         link.last_sync_status = "success"
         link.last_sync_error = None
+        link.remote_name = remote_name
         link.last_synced_at = now_utc()
         record_sync_event(
             db,
@@ -403,3 +405,68 @@ async def sync_channel_links(db: Any, channel: Channel, *, action: str = "auto_u
         else:
             failure_count += 1
     return success_count, failure_count
+
+
+async def delete_channel_sync_link(
+    db: Any,
+    link: ChannelSyncLink,
+    *,
+    delete_remote: bool = False,
+    client: Any = None,
+) -> tuple[bool, str]:
+    if not delete_remote:
+        db.delete(link)
+        db.commit()
+        return True, "同步关联已删除；远端对象未删除。"
+
+    if not link.remote_id:
+        db.delete(link)
+        db.commit()
+        return True, "同步关联已删除；关联中没有远端对象 ID。"
+
+    request_payload = {"remote_type": link.remote_type, "remote_id": link.remote_id}
+    response_payload: Any = None
+    try:
+        _validate_link_target_type(link)
+        target_client = client or client_for_target(link.target)
+        if link.remote_type == "account":
+            result = await target_client.delete_account(link.remote_id)
+        elif link.remote_type == "channel":
+            result = await target_client.delete_channel(link.remote_id)
+        else:
+            raise SyncClientError(f"未知远端对象类型：{link.remote_type}")
+        response_payload = _result_response(result)
+        record_sync_event(
+            db,
+            channel_id=link.channel_id,
+            target_id=link.target_id,
+            link_id=link.id,
+            action="delete_remote",
+            success=True,
+            status_code=_result_status_code(result),
+            message="success",
+            request_payload=request_payload,
+            response_payload=response_payload,
+        )
+        db.delete(link)
+        db.commit()
+        return True, "同步关联已删除；远端对象已删除。"
+    except (SyncClientError, ValueError) as exc:
+        status_code = exc.status_code if isinstance(exc, SyncClientError) else None
+        safe_message = _safe_error_message(str(exc), status_code)
+        link.last_sync_status = "failed"
+        link.last_sync_error = safe_message
+        record_sync_event(
+            db,
+            channel_id=link.channel_id,
+            target_id=link.target_id,
+            link_id=link.id,
+            action="delete_remote",
+            success=False,
+            status_code=status_code,
+            message=safe_message,
+            request_payload=request_payload,
+            response_payload=exc.response if isinstance(exc, SyncClientError) else response_payload,
+        )
+        db.commit()
+        return False, safe_message or "目标站点同步失败。"

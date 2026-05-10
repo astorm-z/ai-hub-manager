@@ -25,7 +25,7 @@ from app.services.extractors import query_channel_balance, seed_builtin_extracto
 from app.services.monitoring import ensure_default_alert_rule, latest_balance, probe_channel_model, recent_status, refresh_channel_balance, refresh_channel_models
 from app.services.notifications import send_notification
 from app.services.scheduler import start_scheduler, stop_scheduler
-from app.services.channel_sync import create_channel_sync_link, sync_channel_links, sync_existing_link
+from app.services.channel_sync import create_channel_sync_link, delete_channel_sync_link as delete_channel_sync_link_service, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, client_for_target
 from app.services.sync_payloads import normalize_newapi_groups
 from app.time_utils import format_dt
@@ -422,11 +422,17 @@ def toggle_channel_sync_link(channel_id: int, link_id: int, db: Annotated[Sessio
 
 
 @app.post("/channels/{channel_id}/sync-links/{link_id}/delete")
-def delete_channel_sync_link(channel_id: int, link_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
+async def delete_channel_sync_link(
+    channel_id: int,
+    link_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    delete_remote: Annotated[bool | None, Form()] = None,
+) -> RedirectResponse:
     link = _get_channel_sync_link(db, channel_id, link_id)
-    db.delete(link)
-    db.commit()
-    return flash_redirect(f"/channels/{channel_id}", "同步关联已删除；远端对象未删除。")
+    success, message = await delete_channel_sync_link_service(db, link, delete_remote=bool(delete_remote))
+    level = "success" if success else "error"
+    return flash_redirect(f"/channels/{channel_id}", message, level)
 
 
 @app.post("/channels/{channel_id}/test-model")

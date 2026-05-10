@@ -486,6 +486,32 @@ button.danger:hover {
   display: inline;
 }
 
+.sync-link-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.sync-link-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-link-action-row.danger-row {
+  padding-top: 2px;
+}
+
+button.solid-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+button.solid-danger:hover {
+  background: #8f1d14;
+}
+
 .auth-page {
   min-height: 100vh;
   display: grid;

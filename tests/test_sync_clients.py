@@ -436,6 +436,20 @@ async def test_sub2api_update_account_sends_put_body_and_path():
 
 
 @pytest.mark.asyncio
+async def test_sub2api_delete_account_sends_delete_and_path():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/v1/admin/accounts/7"
+        return httpx.Response(200, json={"code": 0, "data": {"id": 7}})
+
+    client = Sub2APIClient(sub2api_target(), transport=httpx.MockTransport(handler))
+
+    result = await client.delete_account(7)
+
+    assert result.data == {"id": 7}
+
+
+@pytest.mark.asyncio
 async def test_newapi_create_channel_sends_wrapped_post_body_and_path():
     payload = {"name": "union_main", "status": 1}
 
@@ -465,6 +479,20 @@ async def test_newapi_update_channel_sends_put_body_and_path():
     client = NewAPIClient(newapi_target(), transport=httpx.MockTransport(handler))
 
     result = await client.update_channel(payload)
+
+    assert result.data == {"id": 8}
+
+
+@pytest.mark.asyncio
+async def test_newapi_delete_channel_sends_delete_and_path():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/api/channel/8"
+        return httpx.Response(200, json={"success": True, "data": {"id": 8}})
+
+    client = NewAPIClient(newapi_target(), transport=httpx.MockTransport(handler))
+
+    result = await client.delete_channel(8)
 
     assert result.data == {"id": 8}
 

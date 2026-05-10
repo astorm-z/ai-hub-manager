@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.models import Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget
-from app.services.channel_sync import create_channel_sync_link, record_sync_event, sync_channel_links, sync_existing_link
+from app.services.channel_sync import create_channel_sync_link, delete_channel_sync_link, record_sync_event, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, SyncClientResult
 
 
@@ -30,6 +30,9 @@ class FakeSub2APIClient:
         self.updated_payload = payload
         return SyncClientResult(200, {"id": int(remote_id), **payload}, {"code": 0, "data": {"id": int(remote_id)}})
 
+    async def delete_account(self, remote_id):
+        return SyncClientResult(200, {"id": int(remote_id)}, {"code": 0, "data": {"id": int(remote_id)}})
+
 
 class FakeNewAPIClient:
     def __init__(self, *, existing=None):
@@ -53,6 +56,9 @@ class FakeNewAPIClient:
         self.updated_payload = payload
         return SyncClientResult(200, {"success": True}, {"success": True})
 
+    async def delete_channel(self, remote_id):
+        return SyncClientResult(200, {"success": True, "id": int(remote_id)}, {"success": True})
+
 
 class FakeSensitiveErrorClient:
     async def get_account(self, remote_id):
@@ -73,6 +79,11 @@ class FakeLeakyUpdateErrorClient:
             status_code=500,
             response={"message": "bad"},
         )
+
+
+class FakeDeleteErrorClient:
+    async def delete_account(self, remote_id):
+        raise SyncClientError("delete failed", status_code=500, response={"message": "bad"})
 
 
 class RoutingClient:
@@ -231,6 +242,59 @@ async def test_manual_retry_success_clears_error(db_session):
     assert link.last_sync_status == "success"
     assert link.last_sync_error is None
     assert link.last_synced_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_sub2api_link_renames_remote_from_current_channel_name(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(
+        channel_id=channel.id,
+        target_id=target.id,
+        remote_type="account",
+        remote_id="42",
+        remote_name="union_main",
+    )
+    db_session.add(link)
+    db_session.commit()
+    channel.name = "renamed"
+    db_session.commit()
+
+    client = FakeSub2APIClient()
+    result = await sync_existing_link(db_session, link, client=client, action="manual_update")
+
+    assert result
+    assert client.updated_payload["name"] == "union_renamed"
+    assert link.remote_name == "union_renamed"
+
+
+@pytest.mark.asyncio
+async def test_sync_newapi_link_renames_remote_from_current_channel_name(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(
+        channel_id=channel.id,
+        target_id=target.id,
+        remote_type="channel",
+        remote_id="9",
+        remote_name="union_main",
+        newapi_groups="default",
+    )
+    db_session.add(link)
+    db_session.commit()
+    channel.name = "renamed"
+    db_session.commit()
+
+    client = FakeNewAPIClient()
+    result = await sync_existing_link(db_session, link, client=client, action="manual_update")
+
+    assert result
+    assert client.updated_payload["name"] == "union_renamed"
+    assert link.remote_name == "union_renamed"
 
 
 @pytest.mark.asyncio
@@ -420,3 +484,88 @@ async def test_create_newapi_event_response_includes_create_and_lookup_sources(d
     assert response["create"]["success"] is True
     assert response["lookup"]["id"] == 9
     assert response["remote_id"] == "9"
+
+
+@pytest.mark.asyncio
+async def test_delete_sync_link_without_remote_deletes_only_local_link(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42")
+    db_session.add(link)
+    db_session.commit()
+    link_id = link.id
+
+    success, message = await delete_channel_sync_link(db_session, link, delete_remote=False, client=FakeSub2APIClient())
+
+    assert success
+    assert message == "同步关联已删除；远端对象未删除。"
+    assert db_session.get(ChannelSyncLink, link_id) is None
+    assert db_session.query(SyncEvent).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_sync_link_with_remote_deletes_sub2api_account_and_local_link(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42")
+    db_session.add(link)
+    db_session.commit()
+    link_id = link.id
+
+    success, message = await delete_channel_sync_link(db_session, link, delete_remote=True, client=FakeSub2APIClient())
+
+    assert success
+    assert message == "同步关联已删除；远端对象已删除。"
+    assert db_session.get(ChannelSyncLink, link_id) is None
+    event = db_session.query(SyncEvent).one()
+    assert event.action == "delete_remote"
+    assert event.success is True
+
+
+@pytest.mark.asyncio
+async def test_delete_sync_link_with_remote_deletes_newapi_channel_and_local_link(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="channel", remote_id="9")
+    db_session.add(link)
+    db_session.commit()
+    link_id = link.id
+
+    success, message = await delete_channel_sync_link(db_session, link, delete_remote=True, client=FakeNewAPIClient())
+
+    assert success
+    assert message == "同步关联已删除；远端对象已删除。"
+    assert db_session.get(ChannelSyncLink, link_id) is None
+    event = db_session.query(SyncEvent).one()
+    assert event.action == "delete_remote"
+    assert event.success is True
+
+
+@pytest.mark.asyncio
+async def test_delete_sync_link_remote_failure_keeps_local_link(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="account", remote_id="42")
+    db_session.add(link)
+    db_session.commit()
+    link_id = link.id
+
+    success, message = await delete_channel_sync_link(db_session, link, delete_remote=True, client=FakeDeleteErrorClient())
+
+    assert not success
+    assert message == "目标站点同步失败：HTTP 500"
+    persisted = db_session.get(ChannelSyncLink, link_id)
+    assert persisted is not None
+    assert persisted.last_sync_status == "failed"
+    assert persisted.last_sync_error == "目标站点同步失败：HTTP 500"
+    event = db_session.query(SyncEvent).one()
+    assert event.action == "delete_remote"
+    assert event.success is False

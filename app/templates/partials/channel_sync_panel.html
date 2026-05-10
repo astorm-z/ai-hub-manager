@@ -55,15 +55,25 @@
             {% endif %}
           </td>
           <td>
-            <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/sync">
-              <button class="secondary" type="submit">同步</button>
-            </form>
-            <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/toggle">
-              <button class="secondary" type="submit">{{ "暂停" if link.sync_enabled else "恢复" }}</button>
-            </form>
-            <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/delete" onsubmit="return confirm('确定删除本地同步关联吗？远端对象不会删除。');">
-              <button class="danger" type="submit">删除关联</button>
-            </form>
+            <div class="sync-link-actions">
+              <div class="sync-link-action-row">
+                <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/sync">
+                  <button class="secondary" type="submit">同步</button>
+                </form>
+                <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/toggle">
+                  <button class="secondary" type="submit">{{ "暂停" if link.sync_enabled else "恢复" }}</button>
+                </form>
+              </div>
+              <div class="sync-link-action-row danger-row">
+                <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/delete" onsubmit="return confirm('确定只删除本地同步关联吗？远端对象会保留。');">
+                  <button class="danger" type="submit">删除关联</button>
+                </form>
+                <form class="inline-form" method="post" action="/channels/{{ channel.id }}/sync-links/{{ link.id }}/delete" onsubmit="return confirm('确定从目标站点删除对应渠道，并删除本地同步关联吗？');">
+                  <input type="hidden" name="delete_remote" value="true">
+                  <button class="danger solid-danger" type="submit">删除远端</button>
+                </form>
+              </div>
+            </div>
           </td>
         </tr>
       {% else %}
