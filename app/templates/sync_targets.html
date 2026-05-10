@@ -119,6 +119,7 @@
             <td>{{ row.link_count }}</td>
             <td>
               <a class="button secondary" href="/sync-targets/{{ item.id }}/edit">编辑</a>
+              <a class="button secondary" href="/sync-targets/{{ item.id }}/import">导入渠道</a>
               <form class="inline-form" method="post" action="/sync-targets/{{ item.id }}/test">
                 <button class="secondary" type="submit">测试</button>
               </form>

@@ -25,7 +25,7 @@ from app.services.extractors import query_channel_balance, seed_builtin_extracto
 from app.services.monitoring import ensure_default_alert_rule, latest_balance, probe_channel_model, recent_status, refresh_channel_balance, refresh_channel_models
 from app.services.notifications import send_notification
 from app.services.scheduler import start_scheduler, stop_scheduler
-from app.services.channel_sync import create_channel_sync_link, delete_channel_sync_link as delete_channel_sync_link_service, sync_channel_links, sync_existing_link
+from app.services.channel_sync import create_channel_sync_link, delete_channel_sync_link as delete_channel_sync_link_service, import_remote_channels, list_remote_channel_import_candidates, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, client_for_target
 from app.services.sync_payloads import normalize_newapi_groups
 from app.time_utils import format_dt
@@ -672,6 +672,67 @@ def create_sync_target(
     return flash_redirect("/sync-targets", "目标站点已创建。")
 
 
+@app.get("/sync-targets/{target_id}/import", response_class=HTMLResponse)
+async def import_sync_target_page(
+    target_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+) -> HTMLResponse:
+    target = _get_sync_target(db, target_id)
+    candidates = []
+    list_error = None
+    try:
+        candidates = await list_remote_channel_import_candidates(db, target)
+    except SyncClientError as exc:
+        list_error = remote_import_error_message(exc)
+    return render(
+        request,
+        "sync_target_import.html",
+        {
+            "target": target,
+            "candidates": candidates,
+            "list_error": list_error,
+            "user": user,
+        },
+    )
+
+
+@app.post("/sync-targets/{target_id}/import")
+async def import_sync_target_channels(
+    target_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+) -> RedirectResponse:
+    target = _get_sync_target(db, target_id)
+    form = await request.form()
+    remote_ids = [str(value) for value in form.getlist("remote_ids")]
+    api_keys_by_remote_id = {
+        key.removeprefix("api_key_"): str(value)
+        for key, value in form.multi_items()
+        if isinstance(key, str) and key.startswith("api_key_")
+    }
+    import_path = f"/sync-targets/{target.id}/import"
+    if not remote_ids:
+        return flash_redirect(import_path, "请选择要导入的远端渠道。", "error")
+
+    try:
+        result = await import_remote_channels(db, target, remote_ids, api_keys_by_remote_id=api_keys_by_remote_id)
+    except SyncClientError as exc:
+        return flash_redirect(import_path, remote_import_error_message(exc), "error")
+
+    if result.failed_count:
+        detail = "；".join(result.failures[:3])
+        suffix = f" 失败原因：{detail}" if detail else ""
+        return flash_redirect(
+            import_path,
+            f"导入完成：成功 {result.imported_count} 个，失败 {result.failed_count} 个。{suffix}",
+            "error",
+        )
+    return flash_redirect(import_path, f"导入完成：成功 {result.imported_count} 个。")
+
+
 @app.get("/sync-targets/{target_id}/edit", response_class=HTMLResponse)
 def edit_sync_target_page(target_id: int, request: Request, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> HTMLResponse:
     target = _get_sync_target(db, target_id)
@@ -806,6 +867,12 @@ def group_list_error_message(exc: SyncClientError) -> str:
     if exc.status_code is not None:
         return f"分组列表获取失败：HTTP {exc.status_code}"
     return "分组列表获取失败。"
+
+
+def remote_import_error_message(exc: SyncClientError) -> str:
+    if exc.status_code is not None:
+        return f"远端渠道列表获取失败：HTTP {exc.status_code}"
+    return "远端渠道列表获取失败。"
 
 
 def channel_sync_context(

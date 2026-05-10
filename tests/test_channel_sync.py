@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from app.models import Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget
-from app.services.channel_sync import create_channel_sync_link, delete_channel_sync_link, record_sync_event, sync_channel_links, sync_existing_link
+from app.models import AlertRule, Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget
+from app.services.channel_sync import create_channel_sync_link, delete_channel_sync_link, import_remote_channels, list_remote_channel_import_candidates, record_sync_event, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, SyncClientResult
 
 
@@ -34,6 +34,14 @@ class FakeSub2APIClient:
         return SyncClientResult(200, {"id": int(remote_id)}, {"code": 0, "data": {"id": int(remote_id)}})
 
 
+class FakeSub2APIListClient:
+    def __init__(self, accounts):
+        self.accounts = accounts
+
+    async def list_accounts(self):
+        return self.accounts
+
+
 class FakeNewAPIClient:
     def __init__(self, *, existing=None):
         self.existing = existing
@@ -58,6 +66,14 @@ class FakeNewAPIClient:
 
     async def delete_channel(self, remote_id):
         return SyncClientResult(200, {"success": True, "id": int(remote_id)}, {"success": True})
+
+
+class FakeNewAPIListClient:
+    def __init__(self, channels):
+        self.channels = channels
+
+    async def list_channels(self):
+        return self.channels
 
 
 class FakeSensitiveErrorClient:
@@ -112,6 +128,241 @@ def _add_channel_with_models(db_session):
     )
     db_session.commit()
     return channel
+
+
+@pytest.mark.asyncio
+async def test_remote_import_candidates_filter_existing_newapi_links(db_session):
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    channel = Channel(name="linked", provider_type="openai", base_url="https://linked.test", api_key="key")
+    db_session.add_all([target, channel])
+    db_session.flush()
+    db_session.add(ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="channel", remote_id="9"))
+    db_session.commit()
+
+    candidates = await list_remote_channel_import_candidates(
+        db_session,
+        target,
+        client=FakeNewAPIListClient(
+            [
+                {"id": 9, "name": "linked", "type": 1, "key": "sk-linked", "base_url": "https://linked.test"},
+                {"id": 10, "name": "fresh", "type": 14, "base_url": "https://fresh.test", "models": "claude-3,claude-4"},
+            ]
+        ),
+    )
+
+    assert [item.remote_id for item in candidates] == ["10"]
+    assert candidates[0].provider_type == "claude"
+    assert candidates[0].api_key == ""
+    assert candidates[0].models == ["claude-3", "claude-4"]
+
+
+@pytest.mark.asyncio
+async def test_import_newapi_remote_channel_creates_local_channel_models_and_link(db_session):
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    result = await import_remote_channels(
+        db_session,
+        target,
+        ["9"],
+        client=FakeNewAPIListClient(
+            [
+                {
+                    "id": 9,
+                    "name": "remote-main",
+                    "type": 1,
+                    "key": "sk-remote",
+                    "base_url": "https://remote.test/",
+                    "models": "gpt-4o,gpt-4",
+                    "test_model": "gpt-4o",
+                    "status": 1,
+                    "group": "default,paid",
+                }
+            ]
+        ),
+    )
+
+    channel = db_session.query(Channel).filter(Channel.name == "remote-main").one()
+    link = db_session.query(ChannelSyncLink).one()
+    model_ids = [item.model_id for item in db_session.query(ChannelModel).order_by(ChannelModel.model_id).all()]
+    event = db_session.query(SyncEvent).one()
+
+    assert result.imported_count == 1
+    assert result.failed_count == 0
+    assert channel.base_url == "https://remote.test"
+    assert channel.api_key == "sk-remote"
+    assert channel.probe_model == "gpt-4o"
+    assert model_ids == ["gpt-4", "gpt-4o"]
+    assert db_session.query(AlertRule).filter(AlertRule.channel_id == channel.id).count() == 1
+    assert link.channel_id == channel.id
+    assert link.target_id == target.id
+    assert link.remote_type == "channel"
+    assert link.remote_id == "9"
+    assert link.remote_name == "remote-main"
+    assert link.sync_enabled is True
+    assert link.newapi_groups == "default,paid"
+    assert event.action == "remote_import"
+    assert event.success is True
+    assert "sk-remote" not in event.response_json
+
+
+@pytest.mark.asyncio
+async def test_import_newapi_remote_channel_accepts_manually_supplied_api_key(db_session):
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    result = await import_remote_channels(
+        db_session,
+        target,
+        ["9"],
+        api_keys_by_remote_id={"9": "sk-manual"},
+        client=FakeNewAPIListClient(
+            [
+                {
+                    "id": 9,
+                    "name": "remote-main",
+                    "type": 1,
+                    "base_url": "https://remote.test/",
+                    "models": "gpt-4o",
+                    "status": 1,
+                }
+            ]
+        ),
+    )
+
+    channel = db_session.query(Channel).filter(Channel.name == "remote-main").one()
+
+    assert result.imported_count == 1
+    assert result.failed_count == 0
+    assert channel.api_key == "sk-manual"
+
+
+@pytest.mark.asyncio
+async def test_import_newapi_remote_channel_without_api_key_reports_failure(db_session):
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    result = await import_remote_channels(
+        db_session,
+        target,
+        ["9"],
+        client=FakeNewAPIListClient(
+            [
+                {
+                    "id": 9,
+                    "name": "remote-main",
+                    "type": 1,
+                    "base_url": "https://remote.test/",
+                    "models": "gpt-4o",
+                    "status": 1,
+                }
+            ]
+        ),
+    )
+
+    assert result.imported_count == 0
+    assert result.failed_count == 1
+    assert "缺少 API Key" in result.failures[0]
+    assert db_session.query(Channel).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_import_sub2api_remote_account_creates_unique_local_name_and_link_settings(db_session):
+    existing = Channel(name="remote-main", provider_type="openai", base_url="https://existing.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add_all([existing, target])
+    db_session.commit()
+
+    result = await import_remote_channels(
+        db_session,
+        target,
+        ["42"],
+        client=FakeSub2APIListClient(
+            [
+                {
+                    "id": 42,
+                    "name": "remote-main",
+                    "platform": "anthropic",
+                    "status": "active",
+                    "credentials": {
+                        "api_key": "sk-sub",
+                        "base_url": "https://sub-upstream.test",
+                        "model_mapping": {"claude-3": "claude-3", "claude-4": "claude-4"},
+                    },
+                    "group_ids": [1, 2],
+                    "groups": [{"id": 1, "name": "plus"}, {"id": 2, "name": "free"}],
+                    "priority": 7,
+                    "concurrency": 3,
+                }
+            ]
+        ),
+    )
+
+    channel = db_session.query(Channel).filter(Channel.name == "remote-main-2").one()
+    link = db_session.query(ChannelSyncLink).filter(ChannelSyncLink.channel_id == channel.id).one()
+    model_ids = [item.model_id for item in db_session.query(ChannelModel).filter(ChannelModel.channel_id == channel.id).order_by(ChannelModel.model_id).all()]
+
+    assert result.imported_count == 1
+    assert channel.provider_type == "claude"
+    assert model_ids == ["claude-3", "claude-4"]
+    assert link.remote_type == "account"
+    assert link.remote_id == "42"
+    assert json.loads(link.sub2api_group_ids_json) == [1, 2]
+    assert link.sub2api_priority == 7
+    assert link.sub2api_concurrency == 3
+
+
+@pytest.mark.asyncio
+async def test_sub2api_remote_candidates_include_group_labels(db_session):
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    candidates = await list_remote_channel_import_candidates(
+        db_session,
+        target,
+        client=FakeSub2APIListClient(
+            [
+                {
+                    "id": 42,
+                    "name": "remote-main",
+                    "platform": "openai",
+                    "status": "active",
+                    "credentials": {
+                        "api_key": "sk-sub",
+                        "base_url": "https://sub-upstream.test",
+                    },
+                    "group_ids": [1, 2, 3],
+                    "groups": [{"id": 1, "name": "plus"}],
+                    "account_groups": [
+                        {"group_id": 2, "group": {"id": 2, "name": "free"}},
+                    ],
+                }
+            ]
+        ),
+    )
+
+    assert candidates[0].sub2api_group_ids == [1, 2, 3]
+    assert candidates[0].sub2api_group_labels == ["plus", "free", "3"]
+
+
+@pytest.mark.asyncio
+async def test_import_remote_channels_reports_unavailable_selection(db_session):
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    result = await import_remote_channels(db_session, target, ["missing"], client=FakeNewAPIListClient([]))
+
+    assert result.imported_count == 0
+    assert result.failed_count == 1
+    assert "未找到可导入" in result.failures[0]
+    event = db_session.query(SyncEvent).one()
+    assert event.action == "remote_import"
+    assert event.success is False
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="topbar">
+    <div class="title">
+      <h1>导入目标站点渠道</h1>
+      <p>{{ target.name }} · {{ "new-api" if target.target_type == "new_api" else "sub2api" }} · {{ target.base_url }}</p>
+    </div>
+    <div class="actions">
+      <a class="button secondary" href="/sync-targets">返回同步目标</a>
+    </div>
+  </div>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <h2>未关联远端渠道</h2>
+        <p class="muted">导入后会在本站创建渠道，并建立启用状态的同步关联。</p>
+      </div>
+    </div>
+
+    {% if list_error %}
+      <div class="flash error">{{ list_error }}</div>
+    {% else %}
+      <form method="post" action="/sync-targets/{{ target.id }}/import">
+        <table>
+          <thead>
+            <tr>
+              <th>选择</th>
+              <th>远端对象</th>
+              <th>类型</th>
+              <th>Base URL</th>
+              <th>状态</th>
+              <th>API Key</th>
+              <th>模型</th>
+              <th>同步配置</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in candidates %}
+              <tr>
+                <td>
+                  <input type="checkbox" name="remote_ids" value="{{ item.remote_id }}" aria-label="选择 {{ item.remote_name }}">
+                </td>
+                <td>
+                  {{ item.remote_name }}
+                  <div class="muted small">ID：{{ item.remote_id }}</div>
+                </td>
+                <td>{{ "Claude" if item.provider_type == "claude" else "OpenAI兼容" }}</td>
+                <td><div class="code">{{ item.base_url }}</div></td>
+                <td>
+                  {% if item.enabled %}
+                    <span class="badge success">启用</span>
+                  {% else %}
+                    <span class="badge">停用</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if item.api_key %}
+                    <span class="badge success">已获取</span>
+                  {% else %}
+                    <input name="api_key_{{ item.remote_id }}" type="password" autocomplete="new-password" placeholder="new-api 列表不返回 Key">
+                  {% endif %}
+                </td>
+                <td>{{ item.models|length }}</td>
+                <td>
+                  {% if target.target_type == "sub2api" %}
+                    <div class="small">分组：{{ item.sub2api_group_labels|join("，") if item.sub2api_group_labels else "-" }}</div>
+                    <div class="small">优先级：{{ item.sub2api_priority }}</div>
+                    <div class="small">并发：{{ item.sub2api_concurrency }}</div>
+                  {% else %}
+                    <div class="small">分组：{{ item.newapi_groups or "default" }}</div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="8" class="muted">没有可导入的未关联渠道。</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="actions">
+          <button type="submit" {% if not candidates %}disabled{% endif %}>导入选中渠道</button>
+        </div>
+      </form>
+    {% endif %}
+  </section>
+{% endblock %}

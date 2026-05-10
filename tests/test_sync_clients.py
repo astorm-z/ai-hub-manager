@@ -130,6 +130,37 @@ async def test_sub2api_find_account_checks_later_pages_for_exact_name():
 
 
 @pytest.mark.asyncio
+async def test_sub2api_list_accounts_reads_pages():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = int(request.url.params["page"])
+        assert request.url.params["type"] == "apikey"
+        items = [{"id": 1, "name": "first"}] if page == 1 else [{"id": 2, "name": "second"}]
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "items": items,
+                    "page": page,
+                    "page_size": 100,
+                    "pages": 2,
+                },
+            },
+        )
+
+    client = Sub2APIClient(sub2api_target(), transport=httpx.MockTransport(handler))
+
+    accounts = await client.list_accounts()
+
+    assert accounts == [{"id": 1, "name": "first"}, {"id": 2, "name": "second"}]
+    assert [request.url.params["page"] for request in requests] == ["1", "2"]
+    assert requests[0].url.params["page_size"] == "100"
+
+
+@pytest.mark.asyncio
 async def test_newapi_find_channel_checks_later_pages_for_exact_name():
     requests: list[httpx.Request] = []
 
@@ -157,6 +188,36 @@ async def test_newapi_find_channel_checks_later_pages_for_exact_name():
 
     assert found == {"id": 2, "name": "union_main"}
     assert [request.url.params["p"] for request in requests] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_newapi_list_channels_reads_pages():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = int(request.url.params["p"])
+        items = [{"id": 9, "name": "first"}] if page == 1 else [{"id": 10, "name": "second"}]
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "items": items,
+                    "page": page,
+                    "page_size": 50,
+                    "pages": 2,
+                },
+            },
+        )
+
+    client = NewAPIClient(newapi_target(), transport=httpx.MockTransport(handler))
+
+    channels = await client.list_channels()
+
+    assert channels == [{"id": 9, "name": "first"}, {"id": 10, "name": "second"}]
+    assert [request.url.params["p"] for request in requests] == ["1", "2"]
+    assert requests[0].url.params["page_size"] == "50"
 
 
 @pytest.mark.asyncio

@@ -240,6 +240,159 @@ def test_sync_target_connection_test_uses_sanitized_flash(db_session, monkeypatc
     assert "Authorization" not in flash["message"]
 
 
+def test_sync_target_import_page_renders_unlinked_remote_channels(db_session, monkeypatch):
+    class ListClient:
+        async def list_channels(self):
+            return [
+                {"id": 9, "name": "linked", "type": 1, "key": "sk-linked", "base_url": "https://linked.test"},
+                {"id": 10, "name": "fresh", "type": 1, "base_url": "https://fresh.test", "models": "gpt-4o"},
+            ]
+
+    user = User(username="admin", password_hash="hash")
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", enabled=True, auth_config_json="{}")
+    channel = Channel(name="linked", provider_type="openai", base_url="https://linked.test", api_key="key")
+    db_session.add_all([user, target, channel])
+    db_session.flush()
+    db_session.add(ChannelSyncLink(channel_id=channel.id, target_id=target.id, remote_type="channel", remote_id="9"))
+    db_session.commit()
+    monkeypatch.setattr("app.services.channel_sync.client_for_target", lambda item: ListClient())
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/sync-targets/{target.id}/import",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert "fresh" in response.text
+    assert 'value="10"' in response.text
+    assert 'name="api_key_10"' in response.text
+    assert "linked" not in response.text
+
+
+def test_sync_target_import_post_creates_selected_channel(db_session, monkeypatch):
+    class ListClient:
+        async def list_channels(self):
+            return [
+                {
+                    "id": 10,
+                    "name": "fresh",
+                    "type": 1,
+                    "key": "sk-fresh",
+                    "base_url": "https://fresh.test",
+                    "models": "gpt-4o",
+                    "status": 1,
+                }
+            ]
+
+    user = User(username="admin", password_hash="hash")
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, target])
+    db_session.commit()
+    monkeypatch.setattr("app.services.channel_sync.client_for_target", lambda item: ListClient())
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/sync-targets/{target.id}/import",
+            data={"remote_ids": "10"},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    channel = db_session.query(Channel).filter(Channel.name == "fresh").one()
+    link = db_session.query(ChannelSyncLink).filter(ChannelSyncLink.channel_id == channel.id).one()
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/sync-targets/{target.id}/import"
+    assert flash["message"] == "导入完成：成功 1 个。"
+    assert channel.api_key == "sk-fresh"
+    assert link.remote_id == "10"
+
+
+def test_sync_target_import_post_uses_manual_newapi_key(db_session, monkeypatch):
+    class ListClient:
+        async def list_channels(self):
+            return [
+                {
+                    "id": 10,
+                    "name": "fresh",
+                    "type": 1,
+                    "base_url": "https://fresh.test",
+                    "models": "gpt-4o",
+                    "status": 1,
+                }
+            ]
+
+    user = User(username="admin", password_hash="hash")
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, target])
+    db_session.commit()
+    monkeypatch.setattr("app.services.channel_sync.client_for_target", lambda item: ListClient())
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/sync-targets/{target.id}/import",
+            data={"remote_ids": "10", "api_key_10": "sk-manual"},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    channel = db_session.query(Channel).filter(Channel.name == "fresh").one()
+
+    assert response.status_code == 303
+    assert flash["message"] == "导入完成：成功 1 个。"
+    assert channel.api_key == "sk-manual"
+
+
+def test_sync_target_import_page_renders_sub2api_group_names(db_session, monkeypatch):
+    class ListClient:
+        async def list_accounts(self):
+            return [
+                {
+                    "id": 42,
+                    "name": "remote-main",
+                    "platform": "openai",
+                    "status": "active",
+                    "credentials": {
+                        "api_key": "sk-sub",
+                        "base_url": "https://sub-upstream.test",
+                    },
+                    "group_ids": [1, 2],
+                    "groups": [{"id": 1, "name": "plus"}, {"id": 2, "name": "free"}],
+                }
+            ]
+
+    user = User(username="admin", password_hash="hash")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, target])
+    db_session.commit()
+    monkeypatch.setattr("app.services.channel_sync.client_for_target", lambda item: ListClient())
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/sync-targets/{target.id}/import",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert "分组：plus，free" in response.text
+    assert "分组：[1, 2]" not in response.text
+
+
 def test_channel_sync_context_lists_enabled_targets_and_existing_links(db_session):
     class NoGroupsClient:
         async def list_groups(self, **kwargs):

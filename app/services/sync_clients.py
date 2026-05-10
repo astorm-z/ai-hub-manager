@@ -156,6 +156,21 @@ class Sub2APIClient(BaseTargetClient):
     async def test_connection(self) -> SyncClientResult:
         return await self.request("GET", "/api/v1/admin/accounts", params={"page": 1, "page_size": 1})
 
+    async def list_accounts(self) -> list[dict[str, Any]]:
+        page_size = 100
+        accounts: list[dict[str, Any]] = []
+        for page in range(1, self.max_pages + 1):
+            result = await self.request(
+                "GET",
+                "/api/v1/admin/accounts",
+                params={"page": page, "page_size": page_size, "type": "apikey"},
+            )
+            items = _items_from_paginated(result.data)
+            accounts.extend(items)
+            if not _has_more_pages(result.data, page, page_size, len(items)):
+                return accounts
+        return accounts
+
     async def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
         params = {"platform": platform} if platform else None
         result = await self.request("GET", "/api/v1/admin/groups/all", params=params)
@@ -244,6 +259,21 @@ class NewAPIClient(BaseTargetClient):
 
     async def test_connection(self) -> SyncClientResult:
         return await self.request("GET", "/api/channel/", params={"p": 1, "page_size": 1})
+
+    async def list_channels(self) -> list[dict[str, Any]]:
+        page_size = 50
+        channels: list[dict[str, Any]] = []
+        for page in range(1, self.max_pages + 1):
+            result = await self.request(
+                "GET",
+                "/api/channel/",
+                params={"p": page, "page_size": page_size},
+            )
+            items = _items_from_paginated(result.data)
+            channels.extend(items)
+            if not _has_more_pages(result.data, page, page_size, len(items)):
+                return channels
+        return channels
 
     async def list_groups(self) -> list[dict[str, str]]:
         result = await self.request("GET", "/api/group/")

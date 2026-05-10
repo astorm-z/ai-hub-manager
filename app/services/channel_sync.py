@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
 import json
 import re
 from typing import Any
 
-from app.models import Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget, now_utc
+from app.models import AlertRule, Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget, now_utc
 from app.services.sync_clients import SyncClientError, SyncClientResult, client_for_target
 from app.services.sync_payloads import (
     build_newapi_channel_payload,
@@ -20,6 +21,8 @@ from app.services.sync_payloads import (
 SAME_NAME_ERROR = "目标站点已存在同名对象，请先手动改名或删除后再导入。"
 SAFE_ERROR_MESSAGES = {
     SAME_NAME_ERROR,
+    "缺少 API Key",
+    "缺少 Base URL",
     "目标站点未启用。",
     "该渠道已绑定此同步目标。",
     "分组 ID 必须是字符串或整数列表",
@@ -34,6 +37,33 @@ STRING_SECRET_PATTERNS = (
     re.compile(r"(?i)(password\s*[=:]\s*)([^\s,&;\"'}]+)"),
     re.compile(r'(?i)("(?:api[_-]?key|key|password|authorization)"\s*:\s*")([^"]*)(")'),
 )
+
+
+@dataclass(frozen=True)
+class RemoteChannelCandidate:
+    remote_id: str
+    remote_name: str
+    remote_type: str
+    provider_type: str
+    base_url: str
+    api_key: str
+    enabled: bool
+    models: list[str] = field(default_factory=list)
+    probe_model: str | None = None
+    sub2api_group_ids: list[int] = field(default_factory=list)
+    sub2api_group_labels: list[str] = field(default_factory=list)
+    sub2api_priority: int = 1
+    sub2api_concurrency: int = 10
+    newapi_groups: str = "default"
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RemoteImportResult:
+    imported_count: int
+    failed_count: int
+    imported_channel_ids: list[int]
+    failures: list[str]
 
 
 def channel_model_ids(db: Any, channel_id: int) -> list[str]:
@@ -186,6 +216,415 @@ def _validate_sub2api_link_settings(priority: int, concurrency: int) -> None:
         raise ValueError("sub2api 优先级必须大于或等于 0。")
     if concurrency <= 0:
         raise ValueError("sub2api 并发必须大于 0。")
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        cleaned = _clean_text(value)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _normalize_remote_models(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_models = value.split(",")
+    elif isinstance(value, dict):
+        raw_models = value.keys()
+    elif isinstance(value, (list, tuple, set)):
+        raw_models = value
+    else:
+        raw_models = []
+
+    models: list[str] = []
+    seen: set[str] = set()
+    for raw_model in raw_models:
+        model = _clean_text(raw_model)
+        if not model or model in seen:
+            continue
+        models.append(model)
+        seen.add(model)
+    return sorted(models)
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    parsed = _int_or_default(value, default)
+    return parsed if parsed > 0 else default
+
+
+def _non_negative_int_or_default(value: Any, default: int) -> int:
+    parsed = _int_or_default(value, default)
+    return parsed if parsed >= 0 else default
+
+
+def _provider_from_sub2api_platform(platform: Any) -> str:
+    normalized = _clean_text(platform).lower()
+    if normalized in {"anthropic", "claude"}:
+        return "claude"
+    return "openai"
+
+
+def _provider_from_newapi_type(channel_type: Any) -> str:
+    if _int_or_default(channel_type, 0) == 14:
+        return "claude"
+    return "openai"
+
+
+def _enabled_from_newapi_status(status: Any) -> bool:
+    if isinstance(status, bool):
+        return status
+    if isinstance(status, int):
+        return status == 1
+    normalized = _clean_text(status).lower()
+    if normalized in {"1", "enabled", "enable", "active", "true"}:
+        return True
+    if normalized in {"2", "disabled", "disable", "false"}:
+        return False
+    return True
+
+
+def _enabled_from_sub2api_status(status: Any) -> bool:
+    normalized = _clean_text(status).lower()
+    if normalized in {"disabled", "disable", "inactive", "false", "0"}:
+        return False
+    return True
+
+
+def _group_ids_from_remote(value: Any) -> list[int]:
+    if isinstance(value, str):
+        try:
+            return parse_group_ids(value)
+        except ValueError:
+            return []
+    if not isinstance(value, list):
+        return []
+
+    group_ids: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, dict):
+            raw_id = item.get("id")
+        else:
+            raw_id = item
+        group_id = _int_or_default(raw_id, 0)
+        if group_id <= 0 or group_id in seen:
+            continue
+        group_ids.append(group_id)
+        seen.add(group_id)
+    return group_ids
+
+
+def _group_labels_from_remote(raw: dict[str, Any], group_ids: list[int]) -> list[str]:
+    labels_by_id: dict[int, str] = {}
+
+    groups = raw.get("groups")
+    if isinstance(groups, list):
+        for item in groups:
+            if not isinstance(item, dict):
+                continue
+            group_id = _int_or_default(item.get("id"), 0)
+            group_name = _clean_text(item.get("name"))
+            if group_id > 0 and group_name:
+                labels_by_id[group_id] = group_name
+
+    account_groups = raw.get("account_groups")
+    if isinstance(account_groups, list):
+        for item in account_groups:
+            if not isinstance(item, dict):
+                continue
+            group = item.get("group")
+            group_id = _int_or_default(item.get("group_id"), 0)
+            if isinstance(group, dict):
+                group_id = _int_or_default(group.get("id"), group_id)
+                group_name = _clean_text(group.get("name"))
+            else:
+                group_name = ""
+            if group_id > 0 and group_name:
+                labels_by_id[group_id] = group_name
+
+    return [labels_by_id.get(group_id, str(group_id)) for group_id in group_ids]
+
+
+def _candidate_display_name(raw: dict[str, Any], remote_id: str) -> str:
+    return _first_text(raw.get("name"), raw.get("label"), raw.get("display_name")) or f"remote-{remote_id}"
+
+
+def _newapi_candidate_from_remote(raw: dict[str, Any]) -> RemoteChannelCandidate:
+    remote_id = _extract_remote_id(raw)
+    name = _candidate_display_name(raw, remote_id)
+    api_key = _first_text(raw.get("key"), raw.get("api_key"), raw.get("apiKey"))
+    base_url = _first_text(raw.get("base_url"), raw.get("baseUrl"))
+    if not base_url:
+        raise ValueError("缺少 Base URL")
+
+    return RemoteChannelCandidate(
+        remote_id=remote_id,
+        remote_name=name,
+        remote_type="channel",
+        provider_type=_provider_from_newapi_type(raw.get("type")),
+        base_url=base_url.rstrip("/"),
+        api_key=api_key,
+        enabled=_enabled_from_newapi_status(raw.get("status")),
+        models=_normalize_remote_models(raw.get("models")),
+        probe_model=_first_text(raw.get("test_model"), raw.get("probe_model")) or None,
+        newapi_groups=normalize_newapi_groups(raw.get("group")),
+        raw=raw,
+    )
+
+
+def _sub2api_candidate_from_remote(raw: dict[str, Any]) -> RemoteChannelCandidate:
+    remote_id = _extract_remote_id(raw)
+    name = _candidate_display_name(raw, remote_id)
+    credentials = raw.get("credentials")
+    if not isinstance(credentials, dict):
+        credentials = {}
+    api_key = _first_text(credentials.get("api_key"), credentials.get("apiKey"), raw.get("api_key"), raw.get("key"))
+    base_url = _first_text(credentials.get("base_url"), credentials.get("baseUrl"), raw.get("base_url"))
+    if not api_key:
+        raise ValueError("缺少 API Key")
+    if not base_url:
+        raise ValueError("缺少 Base URL")
+    group_ids = _group_ids_from_remote(raw.get("group_ids"))
+
+    return RemoteChannelCandidate(
+        remote_id=remote_id,
+        remote_name=name,
+        remote_type="account",
+        provider_type=_provider_from_sub2api_platform(raw.get("platform")),
+        base_url=base_url.rstrip("/"),
+        api_key=api_key,
+        enabled=_enabled_from_sub2api_status(raw.get("status")),
+        models=_normalize_remote_models(credentials.get("model_mapping") or raw.get("models")),
+        sub2api_group_ids=group_ids,
+        sub2api_group_labels=_group_labels_from_remote(raw, group_ids),
+        sub2api_priority=_non_negative_int_or_default(raw.get("priority"), 1),
+        sub2api_concurrency=_positive_int_or_default(raw.get("concurrency"), 10),
+        raw=raw,
+    )
+
+
+def _remote_candidate_from_target(target: SyncTarget, raw: dict[str, Any]) -> RemoteChannelCandidate:
+    if target.target_type == "sub2api":
+        return _sub2api_candidate_from_remote(raw)
+    if target.target_type == "new_api":
+        return _newapi_candidate_from_remote(raw)
+    raise SyncClientError(f"未知同步目标类型：{target.target_type}")
+
+
+def _existing_remote_ids(db: Any, target: SyncTarget) -> set[str]:
+    rows = (
+        db.query(ChannelSyncLink.remote_id)
+        .filter(
+            ChannelSyncLink.target_id == target.id,
+            ChannelSyncLink.remote_type == _remote_type_for_target(target),
+            ChannelSyncLink.remote_id.isnot(None),
+        )
+        .all()
+    )
+    return {str(remote_id) for (remote_id,) in rows if remote_id is not None}
+
+
+async def list_remote_channel_import_candidates(
+    db: Any,
+    target: SyncTarget,
+    *,
+    client: Any = None,
+) -> list[RemoteChannelCandidate]:
+    target_client = client or client_for_target(target)
+    if target.target_type == "sub2api":
+        remote_items = await target_client.list_accounts()
+    elif target.target_type == "new_api":
+        remote_items = await target_client.list_channels()
+    else:
+        raise SyncClientError(f"未知同步目标类型：{target.target_type}")
+
+    existing_ids = _existing_remote_ids(db, target)
+    candidates: list[RemoteChannelCandidate] = []
+    for raw in remote_items:
+        try:
+            candidate = _remote_candidate_from_target(target, raw)
+        except (SyncClientError, ValueError):
+            continue
+        if candidate.remote_id in existing_ids:
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def _unique_channel_name(db: Any, preferred_name: str) -> str:
+    base_name = _clean_text(preferred_name) or "远端渠道"
+    existing_names = {
+        name
+        for (name,) in db.query(Channel.name).all()
+    }
+    if base_name not in existing_names:
+        return base_name
+    suffix = 2
+    while True:
+        candidate = f"{base_name}-{suffix}"
+        if candidate not in existing_names:
+            return candidate
+        suffix += 1
+
+
+def _add_channel_models(db: Any, channel: Channel, models: list[str]) -> None:
+    for model_id in models:
+        db.add(ChannelModel(channel_id=channel.id, model_id=model_id, available=True))
+
+
+def _candidate_summary(candidate: RemoteChannelCandidate) -> dict[str, Any]:
+    return {
+        "remote_id": candidate.remote_id,
+        "remote_name": candidate.remote_name,
+        "remote_type": candidate.remote_type,
+        "provider_type": candidate.provider_type,
+        "base_url": candidate.base_url,
+        "enabled": candidate.enabled,
+        "models": candidate.models,
+        "newapi_groups": candidate.newapi_groups,
+        "sub2api_group_ids": candidate.sub2api_group_ids,
+        "sub2api_group_labels": candidate.sub2api_group_labels,
+        "sub2api_priority": candidate.sub2api_priority,
+        "sub2api_concurrency": candidate.sub2api_concurrency,
+    }
+
+
+def apply_candidate_api_key(candidate: RemoteChannelCandidate, api_key: str | None) -> RemoteChannelCandidate:
+    cleaned_api_key = _clean_text(api_key)
+    if not cleaned_api_key:
+        return candidate
+    return replace(candidate, api_key=cleaned_api_key)
+
+
+def _create_channel_from_candidate(db: Any, target_id: int, candidate: RemoteChannelCandidate) -> Channel:
+    if not candidate.api_key:
+        raise ValueError("缺少 API Key")
+    channel = Channel(
+        name=_unique_channel_name(db, candidate.remote_name),
+        provider_type=candidate.provider_type,
+        base_url=candidate.base_url,
+        api_key=candidate.api_key,
+        enabled=candidate.enabled,
+        timeout_seconds=20,
+        model_check_interval_minutes=10,
+        balance_check_interval_minutes=30,
+        probe_model=candidate.probe_model,
+        openai_test_mode="chat_completions",
+        extractor_vars_json="{}",
+    )
+    db.add(channel)
+    db.flush()
+    _add_channel_models(db, channel, candidate.models)
+
+    link = ChannelSyncLink(
+        channel_id=channel.id,
+        target_id=target_id,
+        remote_type=candidate.remote_type,
+        remote_id=candidate.remote_id,
+        remote_name=candidate.remote_name,
+        sync_enabled=True,
+        sub2api_group_ids_json=dumps_group_ids(candidate.sub2api_group_ids),
+        sub2api_priority=candidate.sub2api_priority,
+        sub2api_concurrency=candidate.sub2api_concurrency,
+        newapi_groups=candidate.newapi_groups,
+        last_sync_status="success",
+        last_sync_error=None,
+        last_synced_at=now_utc(),
+    )
+    db.add(link)
+    db.add(AlertRule(channel_id=channel.id))
+    db.flush()
+    record_sync_event(
+        db,
+        channel_id=channel.id,
+        target_id=target_id,
+        link_id=link.id,
+        action="remote_import",
+        success=True,
+        message="success",
+        request_payload={"remote_id": candidate.remote_id},
+        response_payload=_candidate_summary(candidate),
+    )
+    return channel
+
+
+async def import_remote_channels(
+    db: Any,
+    target: SyncTarget,
+    remote_ids: list[str],
+    *,
+    api_keys_by_remote_id: dict[str, str] | None = None,
+    client: Any = None,
+) -> RemoteImportResult:
+    selected_ids = {_clean_text(remote_id) for remote_id in remote_ids if _clean_text(remote_id)}
+    if not selected_ids:
+        return RemoteImportResult(0, 0, [], [])
+
+    target_client = client or client_for_target(target)
+    candidates = await list_remote_channel_import_candidates(db, target, client=target_client)
+    candidates_by_id = {candidate.remote_id: candidate for candidate in candidates}
+    api_keys_by_remote_id = api_keys_by_remote_id or {}
+    target_id_value = target.id
+    imported_channel_ids: list[int] = []
+    failures: list[str] = []
+
+    for remote_id in sorted(selected_ids):
+        candidate = candidates_by_id.get(remote_id)
+        if candidate is None:
+            failures.append(f"{remote_id}: 未找到可导入的未关联渠道")
+            record_sync_event(
+                db,
+                channel_id=None,
+                target_id=target_id_value,
+                action="remote_import",
+                success=False,
+                message="未找到可导入的未关联渠道",
+                request_payload={"remote_id": remote_id},
+            )
+            db.commit()
+            continue
+
+        try:
+            candidate = apply_candidate_api_key(candidate, api_keys_by_remote_id.get(candidate.remote_id))
+            channel = _create_channel_from_candidate(db, target_id_value, candidate)
+            channel_id_value = channel.id
+            db.commit()
+            imported_channel_ids.append(channel_id_value)
+        except Exception as exc:
+            db.rollback()
+            safe_message = _safe_error_message(str(exc)) or "目标站点同步失败。"
+            failures.append(f"{candidate.remote_name}: {safe_message}")
+            record_sync_event(
+                db,
+                channel_id=None,
+                target_id=target_id_value,
+                action="remote_import",
+                success=False,
+                message=safe_message,
+                request_payload={"remote_id": candidate.remote_id},
+                response_payload=candidate.raw,
+            )
+            db.commit()
+
+    return RemoteImportResult(
+        imported_count=len(imported_channel_ids),
+        failed_count=len(failures),
+        imported_channel_ids=imported_channel_ids,
+        failures=failures,
+    )
 
 
 async def create_channel_sync_link(
