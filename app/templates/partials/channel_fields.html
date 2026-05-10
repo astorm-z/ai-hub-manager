@@ -24,16 +24,27 @@
   </div>
   <div class="field">
     <label for="probe_model">探测模型</label>
-    {% set probe_value = channel.probe_model if channel and channel.probe_model else default_openai_probe_model|default('') %}
-    <input
-      id="probe_model"
-      name="probe_model"
-      value="{{ probe_value }}"
-      data-default-openai="{{ default_openai_probe_model|default('gpt-5.4-mini') }}"
-      data-default-claude="{{ default_claude_probe_model|default('claude-haiku-4-5') }}"
-      data-is-new="{{ 'true' if not channel else 'false' }}"
-      placeholder="可选"
-    >
+    {% set probe_value = channel.probe_model if channel and channel.probe_model else '' %}
+    {% set probe_models = models|default([]) %}
+    {% set probe_state = namespace(found=false, count=0) %}
+    <select id="probe_model" name="probe_model">
+      <option value="" {% if not probe_value %}selected{% endif %}>
+        {% if channel %}不设置探测模型{% else %}保存并刷新模型后可选择{% endif %}
+      </option>
+      {% for model in probe_models %}
+        {% set probe_state.count = probe_state.count + 1 %}
+        {% if probe_value == model.model_id %}
+          {% set probe_state.found = true %}
+        {% endif %}
+        <option value="{{ model.model_id }}" {% if probe_value == model.model_id %}selected{% endif %}>{{ model.model_id }}</option>
+      {% endfor %}
+      {% if probe_value and not probe_state.found %}
+        <option value="{{ probe_value }}" selected data-custom-probe="true">{{ probe_value }}（当前，不在模型列表中）</option>
+      {% endif %}
+    </select>
+    {% if channel and probe_state.count == 0 %}
+      <div class="muted small">还没有模型记录，先刷新模型后再选择。</div>
+    {% endif %}
   </div>
   <div class="field">
     <label for="model_check_interval_minutes">模型检测间隔分钟</label>
@@ -76,9 +87,7 @@
 <script>
   (() => {
     const provider = document.querySelector("#provider_type");
-    const probeModel = document.querySelector("#probe_model");
     const openaiOnly = document.querySelectorAll(".provider-openai-only");
-    let lastDefaultProbeModel = probeModel?.value || "";
     const updateProviderFields = () => {
       const isOpenAI = provider.value === "openai";
       openaiOnly.forEach((node) => {
@@ -87,13 +96,6 @@
           field.disabled = !isOpenAI;
         });
       });
-      if (probeModel?.dataset.isNew === "true") {
-        const nextDefault = isOpenAI ? probeModel.dataset.defaultOpenai : probeModel.dataset.defaultClaude;
-        if (!probeModel.value.trim() || probeModel.value === lastDefaultProbeModel) {
-          probeModel.value = nextDefault || "";
-        }
-        lastDefaultProbeModel = nextDefault || "";
-      }
     };
     provider.addEventListener("change", updateProviderFields);
     updateProviderFields();

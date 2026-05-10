@@ -42,10 +42,6 @@ SAFE_SYNC_VALUE_ERRORS = (
     "sub2api 并发必须大于 0。",
 )
 
-DEFAULT_OPENAI_PROBE_MODEL = "gpt-5.4-mini"
-DEFAULT_CLAUDE_PROBE_MODEL = "claude-haiku-4-5"
-
-
 def sync_error_display_message(message: str | None) -> str:
     if not message:
         return "目标站点同步失败。"
@@ -66,17 +62,21 @@ def sync_create_error_display_message(message: str | None) -> str:
     return sync_error_display_message(message)
 
 
-def default_probe_model_for_provider(provider_type: str) -> str:
-    if provider_type == "claude":
-        return DEFAULT_CLAUDE_PROBE_MODEL
-    return DEFAULT_OPENAI_PROBE_MODEL
-
-
-def normalize_new_channel_probe_model(provider_type: str, probe_model: str) -> str:
+def normalize_probe_model_selection(db: Session, channel: Channel | None, probe_model: str) -> str | None:
     normalized = str(probe_model or "").strip()
-    if normalized:
+    if not normalized:
+        return None
+    if channel is None or channel.id is None:
+        return None
+    if normalized == (channel.probe_model or ""):
         return normalized
-    return default_probe_model_for_provider(provider_type)
+    exists = (
+        db.query(ChannelModel.id)
+        .filter(ChannelModel.channel_id == channel.id, ChannelModel.model_id == normalized, ChannelModel.available.is_(True))
+        .first()
+        is not None
+    )
+    return normalized if exists else channel.probe_model
 
 
 def normalize_sync_target_base_url(base_url: str) -> str:
@@ -237,9 +237,8 @@ def new_channel_page(request: Request, db: Annotated[Session, Depends(get_db)], 
         {
             "channel": None,
             "extractors": extractors,
+            "models": [],
             "user": user,
-            "default_openai_probe_model": DEFAULT_OPENAI_PROBE_MODEL,
-            "default_claude_probe_model": DEFAULT_CLAUDE_PROBE_MODEL,
         },
     )
 
@@ -273,7 +272,7 @@ def create_channel(
         timeout_seconds=timeout_seconds,
         model_check_interval_minutes=model_check_interval_minutes,
         balance_check_interval_minutes=balance_check_interval_minutes,
-        probe_model=normalize_new_channel_probe_model(provider_type, probe_model),
+        probe_model=normalize_probe_model_selection(db, None, probe_model),
         openai_test_mode=openai_test_mode,
         extractor_template_id=_optional_int(extractor_template_id),
         extractor_vars_json=extractor_vars_json or "{}",
@@ -290,7 +289,7 @@ def channel_detail(request: Request, channel_id: int, db: Annotated[Session, Dep
     channel = _get_channel(db, channel_id)
     extractors = db.query(ExtractorTemplate).order_by(ExtractorTemplate.builtin.desc(), ExtractorTemplate.name).all()
     rule = ensure_default_alert_rule(db, channel)
-    models = db.query(ChannelModel).filter(ChannelModel.channel_id == channel.id).order_by(ChannelModel.model_id).all()
+    models = db.query(ChannelModel).filter(ChannelModel.channel_id == channel.id, ChannelModel.available.is_(True)).order_by(ChannelModel.model_id).all()
     checks = db.query(HealthCheck).filter(HealthCheck.channel_id == channel.id).order_by(HealthCheck.created_at.desc()).limit(15).all()
     balances = db.query(BalanceSnapshot).filter(BalanceSnapshot.channel_id == channel.id).order_by(BalanceSnapshot.created_at.desc()).limit(10).all()
     check_rows = build_check_rows(db, checks)
@@ -329,7 +328,7 @@ async def update_channel(
     channel.timeout_seconds = timeout_seconds
     channel.model_check_interval_minutes = model_check_interval_minutes
     channel.balance_check_interval_minutes = balance_check_interval_minutes
-    channel.probe_model = probe_model.strip() or None
+    channel.probe_model = normalize_probe_model_selection(db, channel, probe_model)
     channel.openai_test_mode = openai_test_mode
     channel.extractor_template_id = _optional_int(extractor_template_id)
     channel.extractor_vars_json = extractor_vars_json or "{}"

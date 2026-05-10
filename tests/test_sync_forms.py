@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.database import get_db
-from app.main import app, build_sync_target_config, channel_sync_context, create_channel, default_probe_model_for_provider, normalize_new_channel_probe_model, normalize_sync_target_base_url, sync_target_form_from_item
-from app.models import AlertEvent, AlertRule, Channel, ChannelSyncLink, SyncEvent, SyncTarget, User
+from app.main import app, build_sync_target_config, channel_sync_context, create_channel, normalize_probe_model_selection, normalize_sync_target_base_url, sync_target_form_from_item
+from app.models import AlertEvent, AlertRule, Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget, User
 from app.schemas import ProbeResult
 from app.services.auth import make_session_token
 from app.services.sync_clients import SyncClientError
@@ -628,19 +628,33 @@ def test_update_channel_runs_auto_sync_after_save(db_session, monkeypatch):
     assert flash["message"] == "渠道已保存；已同步 1 个目标。"
 
 
-def test_default_probe_model_matches_provider_type():
-    assert default_probe_model_for_provider("openai") == "gpt-5.4-mini"
-    assert default_probe_model_for_provider("claude") == "claude-haiku-4-5"
-    assert default_probe_model_for_provider("unknown") == "gpt-5.4-mini"
+def test_probe_model_selection_uses_channel_model_list(db_session):
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    db_session.add(channel)
+    db_session.flush()
+    db_session.add(ChannelModel(channel_id=channel.id, model_id="gpt-live"))
+    db_session.commit()
+
+    assert normalize_probe_model_selection(db_session, channel, " gpt-live ") == "gpt-live"
 
 
-def test_new_channel_probe_model_defaults_only_when_blank():
-    assert normalize_new_channel_probe_model("openai", "") == "gpt-5.4-mini"
-    assert normalize_new_channel_probe_model("claude", "  ") == "claude-haiku-4-5"
-    assert normalize_new_channel_probe_model("claude", " custom-model ") == "custom-model"
+def test_probe_model_selection_rejects_values_outside_channel_model_list(db_session):
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="key",
+        probe_model="gpt-current",
+    )
+    db_session.add(channel)
+    db_session.commit()
+
+    assert normalize_probe_model_selection(db_session, channel, "made-up-model") == "gpt-current"
+    assert normalize_probe_model_selection(db_session, channel, "") is None
+    assert normalize_probe_model_selection(db_session, None, "made-up-model") is None
 
 
-def test_create_channel_persists_default_probe_model(db_session):
+def test_create_channel_leaves_probe_model_empty_until_models_are_refreshed(db_session):
     user = User(username="admin", password_hash="hash")
 
     response = create_channel(
@@ -662,7 +676,7 @@ def test_create_channel_persists_default_probe_model(db_session):
 
     channel = db_session.query(Channel).filter(Channel.name == "main").one()
     assert response.status_code == 303
-    assert channel.probe_model == "claude-haiku-4-5"
+    assert channel.probe_model is None
 
 
 def test_delete_channel_nulls_history_references_before_delete(db_session):
@@ -692,7 +706,7 @@ def test_delete_channel_nulls_history_references_before_delete(db_session):
     assert alert_event.channel_id is None
 
 
-def test_new_channel_page_renders_probe_model_defaults(db_session):
+def test_new_channel_page_renders_empty_probe_model_select(db_session):
     user = User(username="admin", password_hash="hash")
     db_session.add(user)
     db_session.commit()
@@ -707,9 +721,68 @@ def test_new_channel_page_renders_probe_model_defaults(db_session):
         app.dependency_overrides.pop(get_db, None)
 
     assert response.status_code == 200
-    assert re.search(r'<input[^>]*id="probe_model"[^>]*name="probe_model"[^>]*value="gpt-5\.4-mini"', response.text, flags=re.DOTALL)
-    assert 'data-default-openai="gpt-5.4-mini"' in response.text
-    assert 'data-default-claude="claude-haiku-4-5"' in response.text
+    assert re.search(r'<select[^>]*id="probe_model"[^>]*name="probe_model"', response.text, flags=re.DOTALL)
+    assert "保存并刷新模型后可选择" in response.text
+    assert "gpt-5.4-mini" not in response.text
+    assert "claude-haiku-4-5" not in response.text
+
+
+def test_channel_detail_renders_probe_model_options_from_channel_models(db_session):
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="key",
+        probe_model="gpt-live",
+    )
+    db_session.add_all([user, channel])
+    db_session.flush()
+    db_session.add(AlertRule(channel_id=channel.id))
+    db_session.add(ChannelModel(channel_id=channel.id, model_id="gpt-live"))
+    db_session.add(ChannelModel(channel_id=channel.id, model_id="gpt-other"))
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/channels/{channel.id}",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert '<option value="gpt-live" selected>gpt-live</option>' in response.text
+    assert '<option value="gpt-other" >gpt-other</option>' in response.text
+    assert "gpt-5.4-mini" not in response.text
+
+
+def test_channel_detail_preserves_custom_probe_model_option(db_session):
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="key",
+        probe_model="custom-model",
+    )
+    db_session.add_all([user, channel])
+    db_session.flush()
+    db_session.add(AlertRule(channel_id=channel.id))
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/channels/{channel.id}",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert '<option value="custom-model" selected data-custom-probe="true">custom-model（当前，不在模型列表中）</option>' in response.text
 
 
 def test_refresh_models_runs_auto_sync_when_refresh_succeeds(db_session, monkeypatch):
