@@ -1,4 +1,5 @@
 import json
+import re
 from base64 import urlsafe_b64decode
 
 import pytest
@@ -6,7 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.database import get_db
-from app.main import app, build_sync_target_config, channel_sync_context, sync_target_form_from_item
+from app.main import app, build_sync_target_config, channel_sync_context, create_channel, default_probe_model_for_provider, normalize_new_channel_probe_model, normalize_sync_target_base_url, sync_target_form_from_item
 from app.models import AlertRule, Channel, ChannelSyncLink, SyncTarget, User
 from app.schemas import ProbeResult
 from app.services.auth import make_session_token
@@ -33,6 +34,40 @@ def test_build_newapi_target_config():
     )
 
     assert config == {"authorization": "Bearer token", "new_api_user": "1"}
+
+
+def test_normalize_sync_target_base_url_rejects_missing_host():
+    with pytest.raises(ValueError, match="Base URL 无效"):
+        normalize_sync_target_base_url("https:///s2a.astorm.cn")
+
+
+def test_create_sync_target_rejects_base_url_without_host(db_session):
+    user = User(username="admin", password_hash="hash")
+    db_session.add(user)
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            "/sync-targets",
+            data={
+                "name": "bad-url",
+                "target_type": "sub2api",
+                "base_url": "https:///s2a.astorm.cn",
+                "name_prefix": "union_",
+                "enabled": "true",
+                "sub2api_admin_api_key": "admin-secret",
+            },
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert response.status_code == 303
+    assert flash["message"] == "Base URL 无效，请填写类似 https://target.example.com 的完整地址。"
+    assert db_session.query(SyncTarget).count() == 0
 
 
 def test_sync_target_config_rejects_missing_secret():
@@ -206,6 +241,10 @@ def test_sync_target_connection_test_uses_sanitized_flash(db_session, monkeypatc
 
 
 def test_channel_sync_context_lists_enabled_targets_and_existing_links(db_session):
+    class NoGroupsClient:
+        async def list_groups(self, **kwargs):
+            return []
+
     channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="sk-live")
     enabled_target = SyncTarget(name="enabled", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
     disabled_target = SyncTarget(name="disabled", target_type="new_api", base_url="https://new.test", enabled=False, auth_config_json="{}")
@@ -221,11 +260,51 @@ def test_channel_sync_context_lists_enabled_targets_and_existing_links(db_sessio
     db_session.add(link)
     db_session.commit()
 
-    context = channel_sync_context(db_session, channel)
+    context = channel_sync_context(db_session, channel, client_factory=lambda target: NoGroupsClient())
 
     assert [target.name for target in context["sync_targets"]] == ["enabled"]
     assert context["sync_links"] == [link]
     assert context["linked_target_ids"] == {enabled_target.id}
+    assert context["sync_target_group_options"][enabled_target.id] == []
+
+
+def test_channel_sync_context_loads_remote_group_options(db_session):
+    class GroupClient:
+        def __init__(self, target):
+            self.target = target
+
+        async def list_groups(self, **kwargs):
+            calls.append((self.target.name, kwargs))
+            return [{"value": "1", "label": "default"}]
+
+    calls = []
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="sk-live")
+    sub_target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    new_target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([channel, sub_target, new_target])
+    db_session.commit()
+
+    context = channel_sync_context(db_session, channel, client_factory=lambda target: GroupClient(target))
+
+    assert context["sync_target_group_options"][sub_target.id] == [{"value": "1", "label": "default"}]
+    assert context["sync_target_group_options"][new_target.id] == [{"value": "1", "label": "default"}]
+    assert sorted(calls) == [("new", {}), ("sub", {})]
+
+
+def test_channel_sync_context_records_group_list_error(db_session):
+    class FailingClient:
+        async def list_groups(self, **kwargs):
+            raise SyncClientError("bad token", status_code=401)
+
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="sk-live")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([channel, target])
+    db_session.commit()
+
+    context = channel_sync_context(db_session, channel, client_factory=lambda item: FailingClient())
+
+    assert context["sync_target_group_options"][target.id] == []
+    assert context["sync_target_group_errors"][target.id] == "分组列表获取失败：HTTP 401"
 
 
 def test_channel_sync_link_toggle_requires_link_to_belong_to_channel(db_session):
@@ -333,6 +412,63 @@ def test_update_channel_runs_auto_sync_after_save(db_session, monkeypatch):
     assert flash["message"] == "渠道已保存；已同步 1 个目标。"
 
 
+def test_default_probe_model_matches_provider_type():
+    assert default_probe_model_for_provider("openai") == "gpt-5.4-mini"
+    assert default_probe_model_for_provider("claude") == "claude-haiku-4-5"
+    assert default_probe_model_for_provider("unknown") == "gpt-5.4-mini"
+
+
+def test_new_channel_probe_model_defaults_only_when_blank():
+    assert normalize_new_channel_probe_model("openai", "") == "gpt-5.4-mini"
+    assert normalize_new_channel_probe_model("claude", "  ") == "claude-haiku-4-5"
+    assert normalize_new_channel_probe_model("claude", " custom-model ") == "custom-model"
+
+
+def test_create_channel_persists_default_probe_model(db_session):
+    user = User(username="admin", password_hash="hash")
+
+    response = create_channel(
+        db=db_session,
+        user=user,
+        name="main",
+        provider_type="claude",
+        base_url="https://upstream.test",
+        api_key="key",
+        enabled=True,
+        timeout_seconds=20,
+        model_check_interval_minutes=10,
+        balance_check_interval_minutes=30,
+        probe_model="",
+        openai_test_mode="chat_completions",
+        extractor_template_id="",
+        extractor_vars_json="{}",
+    )
+
+    channel = db_session.query(Channel).filter(Channel.name == "main").one()
+    assert response.status_code == 303
+    assert channel.probe_model == "claude-haiku-4-5"
+
+
+def test_new_channel_page_renders_probe_model_defaults(db_session):
+    user = User(username="admin", password_hash="hash")
+    db_session.add(user)
+    db_session.commit()
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            "/channels/new",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert re.search(r'<input[^>]*id="probe_model"[^>]*name="probe_model"[^>]*value="gpt-5\.4-mini"', response.text, flags=re.DOTALL)
+    assert 'data-default-openai="gpt-5.4-mini"' in response.text
+    assert 'data-default-claude="claude-haiku-4-5"' in response.text
+
+
 def test_refresh_models_runs_auto_sync_when_refresh_succeeds(db_session, monkeypatch):
     calls = []
 
@@ -387,6 +523,75 @@ def test_channel_detail_renders_sync_panel(db_session):
     assert response.status_code == 200
     assert "渠道同步" in response.text
     assert "导入目标站点" in response.text
+
+
+def test_channel_detail_renders_group_multiselects_for_each_target_type(db_session, monkeypatch):
+    class GroupClient:
+        def __init__(self, target):
+            self.target = target
+
+        async def list_groups(self, **kwargs):
+            if self.target.target_type == "sub2api":
+                return [{"value": "1", "label": "sub-default"}]
+            return [{"value": "claude-code", "label": "claude-code"}]
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    sub_target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    new_target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, sub_target, new_target])
+    db_session.flush()
+    db_session.add(AlertRule(channel_id=channel.id))
+    db_session.commit()
+    monkeypatch.setattr("app.main.client_for_target", lambda target: GroupClient(target))
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/channels/{channel.id}",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert 'name="sub2api_group_ids"' in response.text
+    assert 'name="newapi_groups"' in response.text
+    assert 'multiple' in response.text
+    assert 'value="1"' in response.text
+    assert "sub-default" in response.text
+    assert 'value="claude-code"' in response.text
+    assert "claude-code" in response.text
+    assert 'name="sub2api_priority" type="number" min="0" value="1"' in response.text
+    assert 'name="sub2api_concurrency" type="number" min="1" value="10"' in response.text
+
+
+def test_channel_detail_renders_manual_group_fallback_when_group_list_fails(db_session, monkeypatch):
+    class FailingClient:
+        async def list_groups(self, **kwargs):
+            raise SyncClientError("bad token", status_code=401)
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.flush()
+    db_session.add(AlertRule(channel_id=channel.id))
+    db_session.commit()
+    monkeypatch.setattr("app.main.client_for_target", lambda item: FailingClient())
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.get(
+            f"/channels/{channel.id}",
+            cookies={"session": make_session_token(user.id)},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert "分组列表获取失败：HTTP 401" in response.text
+    assert 'data-group-fallback="true"' in response.text
 
 
 def test_manual_sync_failure_flash_sanitizes_remote_error(db_session, monkeypatch):
@@ -519,6 +724,97 @@ def test_create_sync_link_shows_local_sub2api_setting_errors(db_session, monkeyp
 
     flash = _flash_from_response(response)
     assert flash["message"] == "sub2api 并发必须大于 0。"
+
+
+def test_create_sync_link_passes_newapi_groups_to_service(db_session, monkeypatch):
+    captured = {}
+
+    async def fake_create_channel_sync_link(db, channel, target, group_ids, priority, concurrency, *, newapi_groups="", **kwargs):
+        captured.update(
+            {
+                "group_ids": group_ids,
+                "priority": priority,
+                "concurrency": concurrency,
+                "newapi_groups": newapi_groups,
+            }
+        )
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.commit()
+    monkeypatch.setattr("app.main.create_channel_sync_link", fake_create_channel_sync_link)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links",
+            data={"target_id": str(target.id), "newapi_groups": ["claude-code", "claude-code-ot"]},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 303
+    assert captured["newapi_groups"] == "claude-code,claude-code-ot"
+
+
+def test_create_sync_link_passes_multiple_sub2api_group_ids_to_service(db_session, monkeypatch):
+    captured = {}
+
+    async def fake_create_channel_sync_link(db, channel, target, group_ids, priority, concurrency, *, newapi_groups="", **kwargs):
+        captured.update({"group_ids": group_ids, "newapi_groups": newapi_groups})
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.commit()
+    monkeypatch.setattr("app.main.create_channel_sync_link", fake_create_channel_sync_link)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links",
+            data={"target_id": str(target.id), "sub2api_group_ids": ["1", "2"]},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 303
+    assert captured["group_ids"] == "1,2"
+
+
+def test_create_sync_link_uses_sub2api_default_priority_and_concurrency(db_session, monkeypatch):
+    captured = {}
+
+    async def fake_create_channel_sync_link(db, channel, target, group_ids, priority, concurrency, *, newapi_groups="", **kwargs):
+        captured.update({"priority": priority, "concurrency": concurrency})
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", enabled=True, auth_config_json="{}")
+    db_session.add_all([user, channel, target])
+    db_session.commit()
+    monkeypatch.setattr("app.main.create_channel_sync_link", fake_create_channel_sync_link)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/sync-links",
+            data={"target_id": str(target.id), "sub2api_group_ids": "1"},
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 303
+    assert captured == {"priority": 1, "concurrency": 10}
 
 
 def _client_with_db(db_session):

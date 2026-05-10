@@ -85,6 +85,25 @@ def dumps_group_ids(group_ids: Iterable[int]) -> str:
     return json.dumps(list(group_ids), ensure_ascii=False)
 
 
+def normalize_newapi_groups(value: str | Iterable[str] | None) -> str:
+    if value is None:
+        return "default"
+    if isinstance(value, str):
+        raw_groups = value.split(",")
+    else:
+        raw_groups = [str(item) for item in value]
+
+    groups: list[str] = []
+    seen: set[str] = set()
+    for raw_group in raw_groups:
+        group = str(raw_group).strip()
+        if not group or group in seen:
+            continue
+        groups.append(group)
+        seen.add(group)
+    return ",".join(groups) if groups else "default"
+
+
 def provider_to_newapi_type(provider_type: str) -> int:
     if provider_type == "claude":
         return NEW_API_ANTHROPIC_TYPE
@@ -103,6 +122,7 @@ def build_newapi_channel_payload(
     *,
     remote_name: str,
     remote_id: str | int | None = None,
+    newapi_groups: str | Iterable[str] | None = None,
     existing_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = deepcopy(existing_payload) if existing_payload else {}
@@ -115,7 +135,7 @@ def build_newapi_channel_payload(
     payload["models"] = ",".join(_normalize_models(models))
     payload["test_model"] = channel.probe_model or ""
     payload["status"] = 1 if channel.enabled else 2
-    payload.setdefault("group", "default")
+    payload["group"] = normalize_newapi_groups(newapi_groups)
     return payload
 
 

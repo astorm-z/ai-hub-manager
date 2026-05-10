@@ -35,6 +35,7 @@ class FakeNewAPIClient:
     def __init__(self, *, existing=None):
         self.existing = existing
         self.created_payload = None
+        self.updated_payload = None
 
     async def find_channel_by_name(self, name):
         if self.created_payload and self.created_payload["name"] == name:
@@ -49,6 +50,7 @@ class FakeNewAPIClient:
         return {"id": int(remote_id), "name": "union_main", "group": "default"}
 
     async def update_channel(self, payload):
+        self.updated_payload = payload
         return SyncClientResult(200, {"success": True}, {"success": True})
 
 
@@ -151,6 +153,43 @@ async def test_create_newapi_link_searches_created_channel_id(db_session):
 
 
 @pytest.mark.asyncio
+async def test_create_newapi_link_persists_and_sends_selected_groups(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    client = FakeNewAPIClient()
+    link = await create_channel_sync_link(
+        db_session,
+        channel,
+        target,
+        "",
+        50,
+        3,
+        newapi_groups=" claude-code, claude-code-ot ,, ",
+        client=client,
+    )
+
+    assert link.newapi_groups == "claude-code,claude-code-ot"
+    assert client.created_payload["group"] == "claude-code,claude-code-ot"
+
+
+@pytest.mark.asyncio
+async def test_create_newapi_link_allows_blank_sub2api_settings_and_defaults_group(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+
+    client = FakeNewAPIClient()
+    link = await create_channel_sync_link(db_session, channel, target, "", -1, 0, newapi_groups="", client=client)
+
+    assert link.newapi_groups == "default"
+    assert client.created_payload["group"] == "default"
+
+
+@pytest.mark.asyncio
 async def test_sync_failure_updates_link_error_without_raising(db_session):
     channel = _add_channel_with_models(db_session)
     target = SyncTarget(name="sub", target_type="sub2api", base_url="https://sub.test", auth_config_json="{}")
@@ -192,6 +231,30 @@ async def test_manual_retry_success_clears_error(db_session):
     assert link.last_sync_status == "success"
     assert link.last_sync_error is None
     assert link.last_synced_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_existing_newapi_link_reuses_saved_groups(db_session):
+    channel = _add_channel_with_models(db_session)
+    target = SyncTarget(name="new", target_type="new_api", base_url="https://new.test", auth_config_json="{}")
+    db_session.add(target)
+    db_session.commit()
+    link = ChannelSyncLink(
+        channel_id=channel.id,
+        target_id=target.id,
+        remote_type="channel",
+        remote_id="9",
+        remote_name="union_main",
+        newapi_groups="claude-code,claude-code-ot",
+    )
+    db_session.add(link)
+    db_session.commit()
+
+    client = FakeNewAPIClient()
+    result = await sync_existing_link(db_session, link, client=client, action="manual_update")
+
+    assert result
+    assert client.updated_payload["group"] == "claude-code,claude-code-ot"
 
 
 @pytest.mark.asyncio

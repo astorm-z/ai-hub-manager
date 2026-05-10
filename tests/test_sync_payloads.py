@@ -9,6 +9,7 @@ from app.services.sync_payloads import (
     build_newapi_channel_payload,
     build_remote_name,
     build_sub2api_account_payload,
+    normalize_newapi_groups,
     parse_group_ids,
     redact_sensitive,
 )
@@ -48,6 +49,26 @@ def test_newapi_payload_maps_openai_channel():
     assert payload["test_model"] == "gpt-4o"
     assert payload["status"] == 1
     assert payload["group"] == "default"
+
+
+def test_newapi_payload_uses_selected_groups():
+    channel = Channel(
+        id=7,
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="sk-live",
+        enabled=True,
+    )
+
+    payload = build_newapi_channel_payload(
+        channel,
+        ["gpt-4"],
+        remote_name="union_main",
+        newapi_groups=" claude-code, claude-code-ot ,, ",
+    )
+
+    assert payload["group"] == "claude-code,claude-code-ot"
 
 
 def test_newapi_payload_maps_claude_disabled_channel():
@@ -100,6 +121,13 @@ def test_group_id_parser_accepts_commas_and_json():
     assert parse_group_ids("[4, 5]") == [4, 5]
     assert parse_group_ids("") == []
     assert parse_group_ids(None) == []
+
+
+def test_newapi_group_normalizer_cleans_and_defaults():
+    assert normalize_newapi_groups(" claude-code, claude-code-ot ,, ") == "claude-code,claude-code-ot"
+    assert normalize_newapi_groups([" default ", "vip", "", "vip"]) == "default,vip"
+    assert normalize_newapi_groups("") == "default"
+    assert normalize_newapi_groups(None) == "default"
 
 
 def test_group_id_parser_rejects_invalid_values():
@@ -179,12 +207,13 @@ def test_newapi_payload_preserves_existing_fields_without_mutating_input():
         channel,
         ["gpt-4"],
         remote_name="union_main",
+        newapi_groups="claude-code,claude-code-ot",
         existing_payload=existing,
     )
 
     assert existing == {"custom": {"keep": True}, "group": "vip"}
     assert payload["custom"] == {"keep": True}
-    assert payload["group"] == "vip"
+    assert payload["group"] == "claude-code,claude-code-ot"
 
 
 def test_redact_sensitive_masks_nested_secrets():

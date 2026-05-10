@@ -11,6 +11,7 @@ from app.services.sync_payloads import (
     build_remote_name,
     build_sub2api_account_payload,
     dumps_group_ids,
+    normalize_newapi_groups,
     parse_group_ids,
     redact_sensitive,
 )
@@ -195,6 +196,7 @@ async def create_channel_sync_link(
     priority: int,
     concurrency: int,
     *,
+    newapi_groups: str | None = None,
     client: Any = None,
 ) -> ChannelSyncLink:
     remote_name = build_remote_name(target, channel)
@@ -206,8 +208,9 @@ async def create_channel_sync_link(
         if _link_exists(db, channel.id, target.id):
             raise ValueError("该渠道已绑定此同步目标。")
 
-        group_id_values = parse_group_ids(group_ids)
-        _validate_sub2api_link_settings(priority, concurrency)
+        group_id_values = parse_group_ids(group_ids) if target.target_type == "sub2api" else []
+        if target.target_type == "sub2api":
+            _validate_sub2api_link_settings(priority, concurrency)
         link = ChannelSyncLink(
             channel_id=channel.id,
             target_id=target.id,
@@ -216,6 +219,7 @@ async def create_channel_sync_link(
             sub2api_group_ids_json=dumps_group_ids(group_id_values),
             sub2api_priority=priority,
             sub2api_concurrency=concurrency,
+            newapi_groups=normalize_newapi_groups(newapi_groups) if target.target_type == "new_api" else "default",
         )
         target_client = client or client_for_target(target)
         models = channel_model_ids(db, channel.id)
@@ -229,7 +233,12 @@ async def create_channel_sync_link(
         elif target.target_type == "new_api":
             if await target_client.find_channel_by_name(remote_name):
                 raise ValueError(SAME_NAME_ERROR)
-            request_payload = build_newapi_channel_payload(channel, models, remote_name=remote_name)
+            request_payload = build_newapi_channel_payload(
+                channel,
+                models,
+                remote_name=remote_name,
+                newapi_groups=link.newapi_groups,
+            )
             result = await target_client.create_channel(request_payload)
             created = await target_client.find_channel_by_name(remote_name)
             if not created:
@@ -330,6 +339,7 @@ async def sync_existing_link(
                 models,
                 remote_name=link.remote_name or build_remote_name(link.target, link.channel),
                 remote_id=link.remote_id,
+                newapi_groups=link.newapi_groups,
                 existing_payload=existing,
             )
             result = await target_client.update_channel(request_payload)

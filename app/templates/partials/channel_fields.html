@@ -24,7 +24,16 @@
   </div>
   <div class="field">
     <label for="probe_model">探测模型</label>
-    <input id="probe_model" name="probe_model" value="{{ channel.probe_model if channel and channel.probe_model else '' }}" placeholder="可选">
+    {% set probe_value = channel.probe_model if channel and channel.probe_model else default_openai_probe_model|default('') %}
+    <input
+      id="probe_model"
+      name="probe_model"
+      value="{{ probe_value }}"
+      data-default-openai="{{ default_openai_probe_model|default('gpt-5.4-mini') }}"
+      data-default-claude="{{ default_claude_probe_model|default('claude-haiku-4-5') }}"
+      data-is-new="{{ 'true' if not channel else 'false' }}"
+      placeholder="可选"
+    >
   </div>
   <div class="field">
     <label for="model_check_interval_minutes">模型检测间隔分钟</label>
@@ -67,7 +76,9 @@
 <script>
   (() => {
     const provider = document.querySelector("#provider_type");
+    const probeModel = document.querySelector("#probe_model");
     const openaiOnly = document.querySelectorAll(".provider-openai-only");
+    let lastDefaultProbeModel = probeModel?.value || "";
     const updateProviderFields = () => {
       const isOpenAI = provider.value === "openai";
       openaiOnly.forEach((node) => {
@@ -76,6 +87,13 @@
           field.disabled = !isOpenAI;
         });
       });
+      if (probeModel?.dataset.isNew === "true") {
+        const nextDefault = isOpenAI ? probeModel.dataset.defaultOpenai : probeModel.dataset.defaultClaude;
+        if (!probeModel.value.trim() || probeModel.value === lastDefaultProbeModel) {
+          probeModel.value = nextDefault || "";
+        }
+        lastDefaultProbeModel = nextDefault || "";
+      }
     };
     provider.addEventListener("change", updateProviderFields);
     updateProviderFields();

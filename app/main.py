@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import asyncio
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import timedelta
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -25,6 +27,7 @@ from app.services.notifications import send_notification
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.services.channel_sync import create_channel_sync_link, sync_channel_links, sync_existing_link
 from app.services.sync_clients import SyncClientError, client_for_target
+from app.services.sync_payloads import normalize_newapi_groups
 from app.time_utils import format_dt
 
 
@@ -38,6 +41,9 @@ SAFE_SYNC_VALUE_ERRORS = (
     "sub2api 优先级必须大于或等于 0。",
     "sub2api 并发必须大于 0。",
 )
+
+DEFAULT_OPENAI_PROBE_MODEL = "gpt-5.4-mini"
+DEFAULT_CLAUDE_PROBE_MODEL = "claude-haiku-4-5"
 
 
 def sync_error_display_message(message: str | None) -> str:
@@ -58,6 +64,27 @@ def sync_create_error_display_message(message: str | None) -> str:
     if message in SAFE_SYNC_VALUE_ERRORS:
         return message
     return sync_error_display_message(message)
+
+
+def default_probe_model_for_provider(provider_type: str) -> str:
+    if provider_type == "claude":
+        return DEFAULT_CLAUDE_PROBE_MODEL
+    return DEFAULT_OPENAI_PROBE_MODEL
+
+
+def normalize_new_channel_probe_model(provider_type: str, probe_model: str) -> str:
+    normalized = str(probe_model or "").strip()
+    if normalized:
+        return normalized
+    return default_probe_model_for_provider(provider_type)
+
+
+def normalize_sync_target_base_url(base_url: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Base URL 无效，请填写类似 https://target.example.com 的完整地址。")
+    return normalized
 
 
 app = FastAPI(title=settings.app_name)
@@ -204,7 +231,17 @@ def channels_page(request: Request, db: Annotated[Session, Depends(get_db)], use
 @app.get("/channels/new", response_class=HTMLResponse)
 def new_channel_page(request: Request, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> HTMLResponse:
     extractors = db.query(ExtractorTemplate).order_by(ExtractorTemplate.builtin.desc(), ExtractorTemplate.name).all()
-    return render(request, "channel_form.html", {"channel": None, "extractors": extractors, "user": user})
+    return render(
+        request,
+        "channel_form.html",
+        {
+            "channel": None,
+            "extractors": extractors,
+            "user": user,
+            "default_openai_probe_model": DEFAULT_OPENAI_PROBE_MODEL,
+            "default_claude_probe_model": DEFAULT_CLAUDE_PROBE_MODEL,
+        },
+    )
 
 
 @app.post("/channels")
@@ -236,7 +273,7 @@ def create_channel(
         timeout_seconds=timeout_seconds,
         model_check_interval_minutes=model_check_interval_minutes,
         balance_check_interval_minutes=balance_check_interval_minutes,
-        probe_model=probe_model.strip() or None,
+        probe_model=normalize_new_channel_probe_model(provider_type, probe_model),
         openai_test_mode=openai_test_mode,
         extractor_template_id=_optional_int(extractor_template_id),
         extractor_vars_json=extractor_vars_json or "{}",
@@ -334,15 +371,27 @@ async def create_sync_link(
     channel_id: int,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
+    request: Request,
     target_id: Annotated[int, Form()],
     sub2api_group_ids: Annotated[str, Form()] = "",
-    sub2api_priority: Annotated[int, Form()] = 50,
-    sub2api_concurrency: Annotated[int, Form()] = 3,
+    sub2api_priority: Annotated[int, Form()] = 1,
+    sub2api_concurrency: Annotated[int, Form()] = 10,
 ) -> RedirectResponse:
     channel = _get_channel(db, channel_id)
     target = _get_sync_target(db, target_id)
+    form = await request.form()
+    sub2api_group_ids = ",".join(str(value).strip() for value in form.getlist("sub2api_group_ids") if str(value).strip())
+    newapi_groups = normalize_newapi_groups([str(value) for value in form.getlist("newapi_groups")])
     try:
-        await create_channel_sync_link(db, channel, target, sub2api_group_ids, sub2api_priority, sub2api_concurrency)
+        await create_channel_sync_link(
+            db,
+            channel,
+            target,
+            sub2api_group_ids,
+            sub2api_priority,
+            sub2api_concurrency,
+            newapi_groups=newapi_groups,
+        )
     except ValueError as exc:
         return flash_redirect(f"/channels/{channel.id}", sync_create_error_display_message(str(exc)), "error")
     return flash_redirect(f"/channels/{channel.id}", "目标站点导入成功。")
@@ -592,13 +641,14 @@ def create_sync_target(
 ) -> RedirectResponse:
     try:
         config = build_sync_target_config(target_type, sub2api_admin_api_key, newapi_authorization, newapi_user)
+        normalized_base_url = normalize_sync_target_base_url(base_url)
     except ValueError as exc:
         return flash_redirect("/sync-targets", str(exc), "error")
 
     target = SyncTarget(
         name=name.strip(),
         target_type=target_type,
-        base_url=base_url.strip().rstrip("/"),
+        base_url=normalized_base_url,
         enabled=bool(enabled),
         name_prefix=name_prefix.strip() or "union_",
         auth_config_json=json.dumps(config, ensure_ascii=False),
@@ -649,6 +699,7 @@ def update_sync_target(
 ) -> RedirectResponse:
     target = _get_sync_target(db, target_id)
     try:
+        normalized_base_url = normalize_sync_target_base_url(base_url)
         config = build_sync_target_config(
             target_type,
             sub2api_admin_api_key,
@@ -661,7 +712,7 @@ def update_sync_target(
 
     target.name = name.strip()
     target.target_type = target_type
-    target.base_url = base_url.strip().rstrip("/")
+    target.base_url = normalized_base_url
     target.enabled = bool(enabled)
     target.name_prefix = name_prefix.strip() or "union_"
     target.auth_config_json = json.dumps(config, ensure_ascii=False)
@@ -737,7 +788,26 @@ def build_check_rows(db: Session, checks: list[HealthCheck]) -> list[dict[str, A
     return [{"check": item, "balance": find_balance_for_check(db, item) if item.check_type == "balance" else None} for item in checks]
 
 
-def channel_sync_context(db: Session, channel: Channel) -> dict[str, Any]:
+def _run_sync(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError("不能在运行中的事件循环内同步加载目标站点分组。")
+
+
+def group_list_error_message(exc: SyncClientError) -> str:
+    if exc.status_code is not None:
+        return f"分组列表获取失败：HTTP {exc.status_code}"
+    return "分组列表获取失败。"
+
+
+def channel_sync_context(
+    db: Session,
+    channel: Channel,
+    *,
+    client_factory: Any = None,
+) -> dict[str, Any]:
     sync_targets = db.query(SyncTarget).filter(SyncTarget.enabled.is_(True)).order_by(SyncTarget.name).all()
     sync_links = (
         db.query(ChannelSyncLink)
@@ -745,10 +815,32 @@ def channel_sync_context(db: Session, channel: Channel) -> dict[str, Any]:
         .order_by(ChannelSyncLink.created_at.desc())
         .all()
     )
+    linked_target_ids = {link.target_id for link in sync_links}
+    group_options: dict[int, list[dict[str, Any]]] = {}
+    group_errors: dict[int, str] = {}
+    make_client = client_factory or client_for_target
+    for target in sync_targets:
+        if target.id in linked_target_ids:
+            group_options[target.id] = []
+            continue
+        try:
+            client = make_client(target)
+            if target.target_type == "sub2api":
+                groups = _run_sync(client.list_groups())
+            elif target.target_type == "new_api":
+                groups = _run_sync(client.list_groups())
+            else:
+                groups = []
+            group_options[target.id] = groups
+        except SyncClientError as exc:
+            group_options[target.id] = []
+            group_errors[target.id] = group_list_error_message(exc)
     return {
         "sync_targets": sync_targets,
         "sync_links": sync_links,
-        "linked_target_ids": {link.target_id for link in sync_links},
+        "linked_target_ids": linked_target_ids,
+        "sync_target_group_options": group_options,
+        "sync_target_group_errors": group_errors,
     }
 
 
@@ -1146,6 +1238,9 @@ def build_sync_target_rows(db: Session, targets: list[SyncTarget]) -> list[dict[
 
 
 def sync_target_test_error_message(exc: SyncClientError) -> str:
+    message = str(exc)
+    if message.startswith("Base URL 无效"):
+        return message
     if exc.status_code is not None:
         return f"连接测试失败：HTTP {exc.status_code}"
     return "连接测试失败。"

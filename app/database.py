@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
@@ -43,3 +43,18 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    ensure_schema_compatibility(engine)
+
+
+def ensure_schema_compatibility(sqlalchemy_engine: Engine) -> None:
+    if not sqlalchemy_engine.url.get_backend_name().startswith("sqlite"):
+        return
+
+    inspector = inspect(sqlalchemy_engine)
+    if "channel_sync_links" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("channel_sync_links")}
+    if "newapi_groups" not in columns:
+        with sqlalchemy_engine.begin() as connection:
+            connection.execute(text("ALTER TABLE channel_sync_links ADD COLUMN newapi_groups TEXT NOT NULL DEFAULT 'default'"))

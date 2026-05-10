@@ -293,6 +293,78 @@ async def test_sub2api_test_connection_uses_page_size_one():
 
 
 @pytest.mark.asyncio
+async def test_sub2api_list_groups_normalizes_group_records():
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/api/v1/admin/groups/all"
+        assert request.url.params["platform"] == "openai"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "message": "success",
+                "data": [
+                    {"id": 1, "name": "default", "platform": "openai", "status": "active"},
+                    {"id": 2, "name": "claude", "platform": "anthropic", "status": "disabled"},
+                    {"id": None, "name": "broken"},
+                ],
+            },
+        )
+
+    client = Sub2APIClient(sub2api_target(), transport=httpx.MockTransport(handler))
+
+    groups = await client.list_groups(platform="openai")
+
+    assert groups == [
+        {"id": 1, "value": "1", "name": "default", "label": "default（openai）", "platform": "openai", "status": "active"},
+        {"id": 2, "value": "2", "name": "claude", "label": "claude（anthropic，disabled）", "platform": "anthropic", "status": "disabled"},
+    ]
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_sub2api_list_groups_accepts_paginated_shape():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/admin/groups/all"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "items": [
+                        {"id": 3, "name": "openai-default", "platform": "openai", "status": "active"},
+                    ],
+                    "total": 1,
+                    "page": 1,
+                    "page_size": 20,
+                    "pages": 1,
+                },
+            },
+        )
+
+    client = Sub2APIClient(sub2api_target(), transport=httpx.MockTransport(handler))
+
+    groups = await client.list_groups()
+
+    assert groups == [
+        {"id": 3, "value": "3", "name": "openai-default", "label": "openai-default（openai）", "platform": "openai", "status": "active"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sub2api_test_connection_rejects_base_url_without_host():
+    target = sub2api_target()
+    target.base_url = "https:///s2a.astorm.cn"
+    client = Sub2APIClient(target)
+
+    with pytest.raises(SyncClientError, match="Base URL 无效"):
+        await client.test_connection()
+
+
+@pytest.mark.asyncio
 async def test_newapi_test_connection_uses_page_size_one():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params["p"] == "1"
@@ -302,6 +374,31 @@ async def test_newapi_test_connection_uses_page_size_one():
     client = NewAPIClient(newapi_target(), transport=httpx.MockTransport(handler))
 
     await client.test_connection()
+
+
+@pytest.mark.asyncio
+async def test_newapi_list_groups_normalizes_group_names():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/group/"
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "message": "",
+                "data": ["default", " claude-code ", "", "claude-code-ot", "claude-code"],
+            },
+        )
+
+    client = NewAPIClient(newapi_target(), transport=httpx.MockTransport(handler))
+
+    groups = await client.list_groups()
+
+    assert groups == [
+        {"name": "default", "value": "default", "label": "default"},
+        {"name": "claude-code", "value": "claude-code", "label": "claude-code"},
+        {"name": "claude-code-ot", "value": "claude-code-ot", "label": "claude-code-ot"},
+    ]
 
 
 @pytest.mark.asyncio

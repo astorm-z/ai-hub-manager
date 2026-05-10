@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -42,7 +43,16 @@ def load_target_auth(target: SyncTarget) -> dict[str, Any]:
 
 
 def _join_url(base_url: str, path: str) -> str:
-    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    normalized_base_url = _normalize_base_url(base_url)
+    return f"{normalized_base_url}/{path.lstrip('/')}"
+
+
+def _normalize_base_url(base_url: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise SyncClientError("Base URL 无效，请填写类似 https://target.example.com 的完整地址。")
+    return normalized
 
 
 def _items_from_paginated(data: Any) -> list[dict[str, Any]]:
@@ -67,6 +77,22 @@ def _find_named_item(items: list[dict[str, Any]], name: str) -> dict[str, Any] |
         if item.get("name") == name:
             return item
     return None
+
+
+def _clean_group_name(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _dedupe_group_records(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for group in groups:
+        value = str(group.get("value") or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique.append(group)
+    return unique
 
 
 class BaseTargetClient:
@@ -130,6 +156,41 @@ class Sub2APIClient(BaseTargetClient):
     async def test_connection(self) -> SyncClientResult:
         return await self.request("GET", "/api/v1/admin/accounts", params={"page": 1, "page_size": 1})
 
+    async def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
+        params = {"platform": platform} if platform else None
+        result = await self.request("GET", "/api/v1/admin/groups/all", params=params)
+        raw_groups = result.data
+        if isinstance(raw_groups, dict) and isinstance(raw_groups.get("items"), list):
+            raw_groups = raw_groups["items"]
+        if not isinstance(raw_groups, list):
+            raise SyncClientError("Sub2API 分组响应格式无效。", status_code=result.status_code, response=result.data)
+
+        groups: list[dict[str, Any]] = []
+        for item in raw_groups:
+            if not isinstance(item, dict):
+                continue
+            group_id = item.get("id")
+            if group_id is None:
+                continue
+            name = _clean_group_name(item.get("name")) or str(group_id)
+            group_platform = _clean_group_name(item.get("platform"))
+            status = _clean_group_name(item.get("status"))
+            label_parts = [name]
+            meta = [value for value in (group_platform, status if status and status != "active" else "") if value]
+            if meta:
+                label_parts.append(f"（{'，'.join(meta)}）")
+            groups.append(
+                {
+                    "id": group_id,
+                    "value": str(group_id),
+                    "name": name,
+                    "label": "".join(label_parts),
+                    "platform": group_platform,
+                    "status": status,
+                }
+            )
+        return _dedupe_group_records(groups)
+
     async def find_account_by_name(self, name: str) -> dict[str, Any] | None:
         page_size = 20
         for page in range(1, self.max_pages + 1):
@@ -180,6 +241,21 @@ class NewAPIClient(BaseTargetClient):
 
     async def test_connection(self) -> SyncClientResult:
         return await self.request("GET", "/api/channel/", params={"p": 1, "page_size": 1})
+
+    async def list_groups(self) -> list[dict[str, str]]:
+        result = await self.request("GET", "/api/group/")
+        if not isinstance(result.data, list):
+            raise SyncClientError("New API 分组响应格式无效。", status_code=result.status_code, response=result.data)
+
+        groups: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in result.data:
+            name = _clean_group_name(item)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            groups.append({"name": name, "value": name, "label": name})
+        return groups
 
     async def find_channel_by_name(self, name: str) -> dict[str, Any] | None:
         page_size = 20

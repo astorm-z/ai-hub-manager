@@ -13,7 +13,7 @@
         <th>远端对象</th>
         <th>状态</th>
         <th>最近同步</th>
-        <th>sub2api 配置</th>
+        <th>同步配置</th>
         <th>操作</th>
       </tr>
     </thead>
@@ -48,6 +48,8 @@
               <div class="small">分组：{{ link.sub2api_group_ids_json }}</div>
               <div class="small">优先级：{{ link.sub2api_priority }}</div>
               <div class="small">并发：{{ link.sub2api_concurrency }}</div>
+            {% elif link.target.target_type == "new_api" %}
+              <div class="small">分组：{{ link.newapi_groups or "default" }}</div>
             {% else %}
               <span class="muted">不适用</span>
             {% endif %}
@@ -83,18 +85,53 @@
           {% endfor %}
         </select>
       </div>
-      <div class="field channel-sync-sub2api">
-        <label for="sub2api_group_ids">sub2api 分组 ID</label>
-        <input id="sub2api_group_ids" name="sub2api_group_ids" placeholder="例如：1,2">
-      </div>
-      <div class="field channel-sync-sub2api">
-        <label for="sub2api_priority">sub2api 优先级</label>
-        <input id="sub2api_priority" name="sub2api_priority" type="number" min="0" value="50">
-      </div>
-      <div class="field channel-sync-sub2api">
-        <label for="sub2api_concurrency">sub2api 并发</label>
-        <input id="sub2api_concurrency" name="sub2api_concurrency" type="number" min="1" value="3">
-      </div>
+      {% for target in sync_targets %}
+        {% if target.id not in linked_target_ids %}
+          {% set group_options = sync_target_group_options.get(target.id, []) %}
+          {% set group_error = sync_target_group_errors.get(target.id) %}
+          {% if target.target_type == "sub2api" %}
+            <div class="field channel-sync-target-fields channel-sync-sub2api" data-target-id="{{ target.id }}">
+              <label for="sub2api_group_ids_{{ target.id }}">sub2api 分组</label>
+              {% if group_options %}
+                <select id="sub2api_group_ids_{{ target.id }}" name="sub2api_group_ids" multiple size="{{ 4 if group_options|length > 4 else group_options|length }}">
+                  {% for group in group_options %}
+                    <option value="{{ group.value }}">{{ group.label }}</option>
+                  {% endfor %}
+                </select>
+              {% else %}
+                {% if group_error %}
+                  <div class="muted small">{{ group_error }}</div>
+                {% endif %}
+                <input id="sub2api_group_ids_{{ target.id }}" name="sub2api_group_ids" placeholder="例如：1,2" data-group-fallback="true">
+              {% endif %}
+            </div>
+            <div class="field channel-sync-target-fields channel-sync-sub2api" data-target-id="{{ target.id }}">
+              <label for="sub2api_priority_{{ target.id }}">sub2api 优先级</label>
+              <input id="sub2api_priority_{{ target.id }}" name="sub2api_priority" type="number" min="0" value="1">
+            </div>
+            <div class="field channel-sync-target-fields channel-sync-sub2api" data-target-id="{{ target.id }}">
+              <label for="sub2api_concurrency_{{ target.id }}">sub2api 并发</label>
+              <input id="sub2api_concurrency_{{ target.id }}" name="sub2api_concurrency" type="number" min="1" value="10">
+            </div>
+          {% elif target.target_type == "new_api" %}
+            <div class="field channel-sync-target-fields channel-sync-newapi" data-target-id="{{ target.id }}">
+              <label for="newapi_groups_{{ target.id }}">new-api 分组</label>
+              {% if group_options %}
+                <select id="newapi_groups_{{ target.id }}" name="newapi_groups" multiple size="{{ 4 if group_options|length > 4 else group_options|length }}">
+                  {% for group in group_options %}
+                    <option value="{{ group.value }}" {% if group.value == "default" %}selected{% endif %}>{{ group.label }}</option>
+                  {% endfor %}
+                </select>
+              {% else %}
+                {% if group_error %}
+                  <div class="muted small">{{ group_error }}</div>
+                {% endif %}
+                <input id="newapi_groups_{{ target.id }}" name="newapi_groups" placeholder="例如：claude-code,claude-code-ot" data-group-fallback="true">
+              {% endif %}
+            </div>
+          {% endif %}
+        {% endif %}
+      {% endfor %}
     </div>
     <div class="actions">
       <button type="submit" {% if sync_targets|selectattr("id", "in", linked_target_ids)|list|length == sync_targets|length %}disabled{% endif %}>导入目标站点</button>
@@ -105,10 +142,11 @@
 <script>
   document.querySelectorAll(".channel-sync-form").forEach((form) => {
     const targetSelect = form.querySelector(".channel-sync-target");
-    const updateSub2APIFields = () => {
+    const updateTargetFields = () => {
       const selected = targetSelect && targetSelect.selectedOptions.length ? targetSelect.selectedOptions[0] : null;
-      const visible = selected ? selected.dataset.targetType === "sub2api" : false;
-      form.querySelectorAll(".channel-sync-sub2api").forEach((node) => {
+      const selectedTargetId = selected ? selected.value : "";
+      form.querySelectorAll(".channel-sync-target-fields").forEach((node) => {
+        const visible = selectedTargetId && node.dataset.targetId === selectedTargetId;
         node.style.display = visible ? "" : "none";
         node.querySelectorAll("input, select, textarea").forEach((field) => {
           field.disabled = !visible;
@@ -116,8 +154,8 @@
       });
     };
     if (targetSelect) {
-      targetSelect.addEventListener("change", updateSub2APIFields);
+      targetSelect.addEventListener("change", updateTargetFields);
     }
-    updateSub2APIFields();
+    updateTargetFields();
   });
 </script>
