@@ -95,12 +95,12 @@ def balance_check_message(result: BalanceResult) -> str:
 async def run_channel_monitor(db: Session, channel: Channel) -> None:
     if not channel.enabled:
         return
-    if should_run_check(db, channel, "models", channel.model_check_interval_minutes):
-        await refresh_channel_models(db, channel)
-    if channel.probe_model:
-        if should_run_check(db, channel, "probe", channel.model_check_interval_minutes):
+    if channel.model_check_enabled:
+        if should_run_check(db, channel, "models", channel.model_check_interval_minutes):
+            await refresh_channel_models(db, channel)
+        if channel.probe_model and should_run_check(db, channel, "probe", channel.model_check_interval_minutes):
             await probe_channel_model(db, channel)
-    if channel.extractor_template_id and should_run_balance(db, channel):
+    if channel.balance_check_enabled and channel.extractor_template_id and should_run_balance(db, channel):
         await refresh_channel_balance(db, channel)
 
 

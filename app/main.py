@@ -253,7 +253,9 @@ def create_channel(
     api_key: Annotated[str, Form()],
     enabled: Annotated[bool | None, Form()] = None,
     timeout_seconds: Annotated[float, Form()] = 20,
+    model_check_enabled: Annotated[bool | None, Form()] = None,
     model_check_interval_minutes: Annotated[int, Form()] = 10,
+    balance_check_enabled: Annotated[bool | None, Form()] = None,
     balance_check_interval_minutes: Annotated[int, Form()] = 30,
     probe_model: Annotated[str, Form()] = "",
     openai_test_mode: Annotated[str, Form()] = "chat_completions",
@@ -270,7 +272,9 @@ def create_channel(
         api_key=api_key.strip(),
         enabled=bool(enabled),
         timeout_seconds=timeout_seconds,
+        model_check_enabled=bool(model_check_enabled),
         model_check_interval_minutes=model_check_interval_minutes,
+        balance_check_enabled=bool(balance_check_enabled),
         balance_check_interval_minutes=balance_check_interval_minutes,
         probe_model=normalize_probe_model_selection(db, None, probe_model),
         openai_test_mode=openai_test_mode,
@@ -309,7 +313,9 @@ async def update_channel(
     api_key: Annotated[str, Form()],
     enabled: Annotated[bool | None, Form()] = None,
     timeout_seconds: Annotated[float, Form()] = 20,
+    model_check_enabled: Annotated[bool | None, Form()] = None,
     model_check_interval_minutes: Annotated[int, Form()] = 10,
+    balance_check_enabled: Annotated[bool | None, Form()] = None,
     balance_check_interval_minutes: Annotated[int, Form()] = 30,
     probe_model: Annotated[str, Form()] = "",
     openai_test_mode: Annotated[str, Form()] = "chat_completions",
@@ -326,7 +332,9 @@ async def update_channel(
     channel.api_key = api_key.strip()
     channel.enabled = bool(enabled)
     channel.timeout_seconds = timeout_seconds
+    channel.model_check_enabled = bool(model_check_enabled)
     channel.model_check_interval_minutes = model_check_interval_minutes
+    channel.balance_check_enabled = bool(balance_check_enabled)
     channel.balance_check_interval_minutes = balance_check_interval_minutes
     channel.probe_model = normalize_probe_model_selection(db, channel, probe_model)
     channel.openai_test_mode = openai_test_mode
@@ -359,6 +367,8 @@ async def refresh_models(channel_id: int, db: Annotated[Session, Depends(get_db)
     channel = _get_channel(db, channel_id)
     channel_id_value = channel.id
     redirect_path = f"/channels/{channel_id_value}"
+    if not channel.model_check_enabled:
+        return flash_redirect(redirect_path, "模型检测已关闭。", "error")
     result = await refresh_channel_models(db, channel)
     if result.success:
         set_committed_value(channel, "id", channel_id_value)
@@ -453,6 +463,8 @@ async def test_channel_model(
 @app.post("/channels/{channel_id}/refresh-balance")
 async def refresh_balance(channel_id: int, db: Annotated[Session, Depends(get_db)], user: Annotated[User, Depends(require_user)]) -> RedirectResponse:
     channel = _get_channel(db, channel_id)
+    if not channel.balance_check_enabled:
+        return flash_redirect(f"/channels/{channel.id}", "余额检测已关闭。", "error")
     result = await refresh_channel_balance(db, channel)
     if result.is_valid:
         message = f"余额：{result.remaining if result.remaining is not None else '-'} {result.unit or ''}"

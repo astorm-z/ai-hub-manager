@@ -131,6 +131,47 @@ def test_schema_compatibility_adds_newapi_groups_to_existing_channel_sync_links_
         engine.dispose()
 
 
+def test_schema_compatibility_adds_detection_switches_to_existing_channels_table():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE channels RENAME TO channels_new_schema"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE channels (
+                        id INTEGER NOT NULL PRIMARY KEY,
+                        name VARCHAR(120) NOT NULL,
+                        provider_type VARCHAR(32) NOT NULL,
+                        base_url VARCHAR(500) NOT NULL,
+                        api_key TEXT NOT NULL,
+                        enabled BOOLEAN NOT NULL,
+                        timeout_seconds FLOAT NOT NULL,
+                        model_check_interval_minutes INTEGER NOT NULL,
+                        balance_check_interval_minutes INTEGER NOT NULL,
+                        probe_model VARCHAR(200),
+                        openai_test_mode VARCHAR(32) NOT NULL,
+                        extractor_template_id INTEGER,
+                        extractor_vars_json TEXT NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(text("DROP TABLE channels_new_schema"))
+
+        ensure_schema_compatibility(engine)
+        ensure_schema_compatibility(engine)
+
+        columns = {column["name"] for column in inspect(engine).get_columns("channels")}
+        assert "model_check_enabled" in columns
+        assert "balance_check_enabled" in columns
+    finally:
+        engine.dispose()
+
+
 def test_channel_target_pair_is_unique(db_session):
     channel = Channel(name="c1", provider_type="openai", base_url="https://local.test", api_key="local-key")
     target = SyncTarget(name="new-api", target_type="new_api", base_url="https://newapi.test", auth_config_json="{}")

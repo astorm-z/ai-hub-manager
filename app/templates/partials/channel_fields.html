@@ -49,10 +49,18 @@
   <div class="field">
     <label for="model_check_interval_minutes">模型检测间隔分钟</label>
     <input id="model_check_interval_minutes" name="model_check_interval_minutes" type="number" min="1" value="{{ channel.model_check_interval_minutes if channel else 10 }}">
+    <label class="check-row">
+      <input type="checkbox" name="model_check_enabled" value="true" {% if not channel or channel.model_check_enabled %}checked{% endif %}>
+      启用模型检测
+    </label>
   </div>
   <div class="field">
     <label for="balance_check_interval_minutes">余额检测间隔分钟</label>
     <input id="balance_check_interval_minutes" name="balance_check_interval_minutes" type="number" min="1" value="{{ channel.balance_check_interval_minutes if channel else 30 }}">
+    <label class="check-row">
+      <input type="checkbox" name="balance_check_enabled" value="true" {% if not channel or channel.balance_check_enabled %}checked{% endif %}>
+      启用余额检测
+    </label>
   </div>
   <div class="field provider-openai-only">
     <label for="openai_test_mode">OpenAI 测试接口</label>

@@ -9,7 +9,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.database import get_db
 from app.main import app, build_sync_target_config, channel_sync_context, create_channel, normalize_probe_model_selection, normalize_sync_target_base_url, sync_target_form_from_item
 from app.models import AlertEvent, AlertRule, Channel, ChannelModel, ChannelSyncLink, SyncEvent, SyncTarget, User
-from app.schemas import ProbeResult
+from app.schemas import BalanceResult, ProbeResult
 from app.services.auth import make_session_token
 from app.services.sync_clients import SyncClientError
 
@@ -666,7 +666,9 @@ def test_create_channel_leaves_probe_model_empty_until_models_are_refreshed(db_s
         api_key="key",
         enabled=True,
         timeout_seconds=20,
+        model_check_enabled=True,
         model_check_interval_minutes=10,
+        balance_check_enabled=True,
         balance_check_interval_minutes=30,
         probe_model="",
         openai_test_mode="chat_completions",
@@ -677,6 +679,33 @@ def test_create_channel_leaves_probe_model_empty_until_models_are_refreshed(db_s
     channel = db_session.query(Channel).filter(Channel.name == "main").one()
     assert response.status_code == 303
     assert channel.probe_model is None
+
+
+def test_update_channel_saves_detection_switches(db_session, monkeypatch):
+    async def fake_sync_channel_links(db, channel, *, action):
+        return (0, 0)
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(name="main", provider_type="openai", base_url="https://upstream.test", api_key="key")
+    db_session.add_all([user, channel])
+    db_session.commit()
+    monkeypatch.setattr("app.main.sync_channel_links", fake_sync_channel_links)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}",
+            data=_channel_form_data(model_check_enabled="", balance_check_enabled=""),
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    db_session.refresh(channel)
+    assert response.status_code == 303
+    assert channel.model_check_enabled is False
+    assert channel.balance_check_enabled is False
 
 
 def test_delete_channel_nulls_history_references_before_delete(db_session):
@@ -816,6 +845,76 @@ def test_refresh_models_runs_auto_sync_when_refresh_succeeds(db_session, monkeyp
     assert response.status_code == 303
     assert calls == [(channel.id, "auto_update")]
     assert flash["message"] == "ok"
+
+
+def test_refresh_models_is_blocked_when_model_check_disabled(db_session, monkeypatch):
+    calls = []
+
+    async def fake_refresh_channel_models(db, channel):
+        calls.append(channel.id)
+        return ProbeResult(success=True, status_code=200, latency_ms=12, message="ok")
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="key",
+        model_check_enabled=False,
+    )
+    db_session.add_all([user, channel])
+    db_session.commit()
+    monkeypatch.setattr("app.main.refresh_channel_models", fake_refresh_channel_models)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/refresh-models",
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert response.status_code == 303
+    assert calls == []
+    assert flash["message"] == "模型检测已关闭。"
+
+
+def test_refresh_balance_is_blocked_when_balance_check_disabled(db_session, monkeypatch):
+    calls = []
+
+    async def fake_refresh_channel_balance(db, channel):
+        calls.append(channel.id)
+        return BalanceResult(is_valid=True, remaining=10, unit="USD")
+
+    user = User(username="admin", password_hash="hash")
+    channel = Channel(
+        name="main",
+        provider_type="openai",
+        base_url="https://upstream.test",
+        api_key="key",
+        balance_check_enabled=False,
+    )
+    db_session.add_all([user, channel])
+    db_session.commit()
+    monkeypatch.setattr("app.main.refresh_channel_balance", fake_refresh_channel_balance)
+
+    client = _client_with_db(db_session)
+    try:
+        response = client.post(
+            f"/channels/{channel.id}/refresh-balance",
+            cookies={"session": make_session_token(user.id)},
+            follow_redirects=False,
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    flash = _flash_from_response(response)
+    assert response.status_code == 303
+    assert calls == []
+    assert flash["message"] == "余额检测已关闭。"
 
 
 def test_channel_detail_renders_sync_panel(db_session):
@@ -1159,7 +1258,9 @@ def _channel_form_data(**overrides):
         "api_key": "key",
         "enabled": "true",
         "timeout_seconds": "20",
+        "model_check_enabled": "true",
         "model_check_interval_minutes": "10",
+        "balance_check_enabled": "true",
         "balance_check_interval_minutes": "30",
         "probe_model": "",
         "openai_test_mode": "chat_completions",

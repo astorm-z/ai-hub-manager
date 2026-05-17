@@ -7,10 +7,10 @@
     </div>
     <div class="actions">
       <form class="inline-form" method="post" action="/channels/{{ channel.id }}/refresh-models">
-        <button type="submit">刷新模型</button>
+        <button type="submit" {% if not channel.model_check_enabled %}disabled title="模型检测已关闭"{% endif %}>刷新模型</button>
       </form>
       <form class="inline-form" method="post" action="/channels/{{ channel.id }}/refresh-balance">
-        <button class="secondary" type="submit">查询余额</button>
+        <button class="secondary" type="submit" {% if not channel.balance_check_enabled %}disabled title="余额检测已关闭"{% endif %}>查询余额</button>
       </form>
       <form class="inline-form" method="post" action="/channels/{{ channel.id }}/delete" onsubmit="return confirm('确定删除这个渠道吗？');">
         <button class="danger" type="submit">删除</button>

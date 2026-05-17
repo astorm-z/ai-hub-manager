@@ -51,6 +51,14 @@ def ensure_schema_compatibility(sqlalchemy_engine: Engine) -> None:
         return
 
     inspector = inspect(sqlalchemy_engine)
+    if "channels" in inspector.get_table_names():
+        channel_columns = {column["name"] for column in inspector.get_columns("channels")}
+        with sqlalchemy_engine.begin() as connection:
+            if "model_check_enabled" not in channel_columns:
+                connection.execute(text("ALTER TABLE channels ADD COLUMN model_check_enabled BOOLEAN NOT NULL DEFAULT 1"))
+            if "balance_check_enabled" not in channel_columns:
+                connection.execute(text("ALTER TABLE channels ADD COLUMN balance_check_enabled BOOLEAN NOT NULL DEFAULT 1"))
+
     if "channel_sync_links" not in inspector.get_table_names():
         return
 

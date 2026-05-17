@@ -512,6 +512,27 @@ button.solid-danger:hover {
   background: #8f1d14;
 }
 
+.button:disabled,
+button:disabled,
+.button.secondary:disabled,
+button.secondary:disabled,
+.button.danger:disabled,
+button.danger:disabled {
+  border-color: #cdd6df;
+  background: #eef2f6;
+  color: #7b8794;
+  cursor: not-allowed;
+}
+
+.button:disabled:hover,
+button:disabled:hover,
+.button.secondary:disabled:hover,
+button.secondary:disabled:hover,
+.button.danger:disabled:hover,
+button.danger:disabled:hover {
+  background: #eef2f6;
+}
+
 .auth-page {
   min-height: 100vh;
   display: grid;
